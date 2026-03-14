@@ -19,7 +19,7 @@ Given a `let` binding annotated with `[@contract]`, the preprocessor will rewrit
 
 ```ocaml
 (* original *)
-let [@contract : Kontract] var : v_type = body
+let [@contract : kontract] var : v_type = value
 
 (* rewritten *)
 let var pos neg cloc =
@@ -32,7 +32,7 @@ let var pos neg cloc =
       effc = fun (type e) (eff : e Effect.t) ->
         match eff with
         | Contract.v v -> Some (fun k ->
-            let valid = Kontract v in
+            let valid = kontract v in
             if valid
             then continue k ()
             else discontinue k (Blame pos)
@@ -42,7 +42,7 @@ let var pos neg cloc =
   in
 
   try_with (fun () ->
-    Effect.perform (Contract.v body);
+    Effect.perform (Contract.v value);
   ) ()
   handler
 ```
@@ -53,16 +53,22 @@ let
   f x y z = body
 
 (* compiles into *)
-
-let f x y z =
+let f pos neg cloc x y z =
   let [@contract : contract_for_x] x = x in
-  let [@contract : contract_for_y] y = y in
-  let [@contract : contract_for_z] z = z in
+  let x = x in
 
-  (* define a new return value *)
-  let [@contract : contract_for_f] ret = body in
-  ret
+  let [@contract : contract_for_y] y = y in
+  let y = y in
+
+  let [@contract : contract_for_z] z = z in
+  let z = y in
+
+  let [@contract : contract_for_f] __ret__ = body in
+  let __ret__ = __ret__ in
+  __ret__
 ```
+
+The function arguments and return value is "redefined" to fix their labels.
 
 ## Blame Labels handling
 
