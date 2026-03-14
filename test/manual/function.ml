@@ -3,9 +3,22 @@ open Effect.Deep
 exception Blame of string
 
 let
-  [@contract]
+  [@contract : a -> b]
   [@effect : effect_A -> check_effectA_return ]
-  run
-  (x : int [@pre : bigger_than_10])
-  : int [@post : bigger_than_20] =
+  run x : int =
   x + 1
+  (* (x neg pos "run.x") + 1 *)
+
+let
+  [@contract : (a -> b) -> c]
+  [@effect : effect_A -> check_effectA_return ]
+  run f : int =
+  f 1
+  (* (f neg pos "run.x") + 1 *)
+
+let
+  [@contract : a -> (b -> 'd c)]
+  [@effect : effect_A -> check_effectA_return ]
+  run x : int =
+  let f y = x + y in
+  f 1
