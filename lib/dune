@@ -1,6 +1,10 @@
 (library
  (public_name conteff)
  (kind ppx_rewriter)
- (libraries ppxlib)
- (preprocess (pps ppxlib.metaquot))
- (flags (:standard -w -11-26-27-32-33-34-35-37-38-39)))
+ (libraries ppxlib str)
+ (preprocess
+   (pps
+     ppxlib.metaquot
+     ppx_deriving.show
+     ppx_deriving.eq))
+ (flags (:standard -w -11-23-26-27-32-33-34-35-36-37-38-39)))
