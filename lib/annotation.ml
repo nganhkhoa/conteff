@@ -75,3 +75,14 @@ let get_contract_payload attrs =
           loop rest
   in
   loop attrs
+
+let rec core_type_of_contract ~loc (c : contract) : core_type =
+  let mk_constr name = Ast_builder.Default.ptyp_constr ~loc { txt = Lident name; loc } [] in
+  match c with
+  | Flat s -> mk_constr s
+  | Dependent s -> mk_constr s
+  | Trace (s1, _s2) -> mk_constr s1 (* Adjust depending on how you represent Trace in AST *)
+  | Function (dom, rng) ->
+      Ast_builder.Default.ptyp_arrow ~loc Nolabel
+        (core_type_of_contract ~loc dom)
+        (core_type_of_contract ~loc rng)
