@@ -401,7 +401,31 @@ let expander = object (self)
 
         (* 1. Build the newly wrapped body *)
         let wrapped_body = build_body contract params body in
-        let wrapped_body = self#expression ctx wrapped_body in
+
+        (* ctx must be updated to remove shadow parameter *)
+        (* 1. Helper to extract names from a single pattern *)
+        let rec collect_in_pattern acc pat =
+          match pat.ppat_desc with
+          | Ppat_var { txt; _ } -> txt :: acc
+          | Ppat_constraint (p, _) -> collect_in_pattern acc p
+          | _ -> acc
+        in
+        let bound_names =
+          List.fold_left (fun acc param ->
+            match param.pparam_desc with
+            | Pparam_val (_label, _default_opt, pat) -> collect_in_pattern acc pat
+            | Pparam_newtype _ -> acc
+          ) [] params
+        in
+
+        Printf.eprintf "uh huh, params collected:\n";
+        List.iter (Printf.eprintf "fack %s\n") bound_names;
+
+        let shadowed_ctx = {
+          ctx with
+          monitors = List.filter (fun m -> not (List.mem m.name bound_names)) ctx.monitors
+        } in
+        let wrapped_body = self#expression shadowed_ctx wrapped_body in
 
         (* 2. Generate the new `pos`, `neg`, `cloc` parameters *)
         let mk_extra_param name =
@@ -462,11 +486,7 @@ let expander = object (self)
               pvb_attributes = [];
               pvb_constraint = update_constraint ~loc:vb.pvb_loc vb.pvb_constraint;
             }
-        | _ ->
-            { vb with
-              pvb_expr = new_expr;
-              pvb_attributes = [];
-            }
+        | _ -> vb
 
   (* don't modify the context here, ctx should be modified somewhere else *)
   method! value_binding ctx vb =
@@ -474,12 +494,12 @@ let expander = object (self)
     match contract with
     | Some contract ->
         (* we don't filter out the same name here, shadow valid after this binding *)
-        (* let var_name = Option.get (binding_name vb) in *)
-        (* Printf.eprintf "%s with contract %s (%s) current context is %s\n"
+        (* let var_name = Option.get (binding_name vb) in
+        Printf.eprintf "%s with contract %s (%s) current context is %s\n"
           var_name (show_contract contract) (Option.get ctx.current) (show_rewrite_context ctx); *)
 
-        let new_expr = self#expression ctx vb.pvb_expr in
-        self#transform_contract_wrapper ctx contract { vb with pvb_expr = new_expr }
+        (* don't fix value here, it will be fixed during transform *)
+        self#transform_contract_wrapper ctx contract vb
 
     | None ->
         let new_expr = self#expression ctx vb.pvb_expr in
@@ -511,7 +531,11 @@ let expander = object (self)
           (* remove duplicated name because shadowing *)
           ({cctx with monitors = new_monitors}, new_binding :: new_bindings)
         ) (ctx, []) bindings in
+
         let mapped_body = self#expression new_ctx body in
+
+        (* Printf.eprintf "fix using context %s expr %s\n" (show_rewrite_context ctx) (Pprintast.string_of_expression body); *)
+
         { expr with pexp_desc = Pexp_let (rec_flag, List.rev new_bindings, mapped_body) }
 
     | Pexp_ident { txt = Lident var_name; loc } ->
