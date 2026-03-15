@@ -1,0 +1,34 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ "main", "master" ]
+
+jobs:
+  build-and-test:
+    if: contains(github.event.head_commit.message, 'ci:')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup OCaml & OPAM
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.1.x
+          opam-repositories: |
+            default: https://github.com/ocaml/opam-repository.git
+
+      - name: Setup Dune
+        uses: ocaml-dune/setup-dune@v2
+        with:
+          steps: ""
+
+      - name: Build
+        run: |
+          opam install . --deps-only --with-test --locked
+          opam exec -- dune build lib/
+
+      - name: Run unit tests
+        run: opam exec -- dune runtest test/unit

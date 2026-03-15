@@ -136,23 +136,6 @@ let rec deep_eta_expand ~loc expr typ prefix =
         (Some (Pconstraint ret_typ))
         (Pfunction_body app_expr)
 
-let print_expr_ast (expr) =
-  let native_expr = Selected_ast.To_ocaml.copy_expression expr in
-  Format.eprintf "--- EXPRESSION AST ---@.%a@."
-    (Ocaml_common.Printast.expression 0) native_expr
-
-let print_vb_ast (vb : value_binding) =
-  (* Convert ppxlib's AST into the compiler's native Parsetree *)
-  let native_pat = Selected_ast.To_ocaml.copy_pattern vb.pvb_pat in
-  let native_expr = Selected_ast.To_ocaml.copy_expression vb.pvb_expr in
-
-  (* Now pass the native nodes to Printast *)
-  Format.eprintf "--- PATTERN AST ---@.%a@."
-    (Ocaml_common.Printast.pattern 0) native_pat;
-
-  Format.eprintf "--- EXPRESSION AST ---@.%a@."
-    (Ocaml_common.Printast.expression 0) native_expr
-
 let prepend_monitor_types ~loc old_typ =
   let string_typ =
     Ast_builder.Default.ptyp_constr ~loc { txt = Lident "string"; loc } []
@@ -494,7 +477,6 @@ let expander = object (self)
         (* let var_name = Option.get (binding_name vb) in *)
         (* Printf.eprintf "%s with contract %s (%s) current context is %s\n"
           var_name (show_contract contract) (Option.get ctx.current) (show_rewrite_context ctx); *)
-        (* print_vb_ast binding; *)
 
         let new_expr = self#expression ctx vb.pvb_expr in
         self#transform_contract_wrapper ctx contract { vb with pvb_expr = new_expr }
@@ -506,9 +488,7 @@ let expander = object (self)
   method! expression ctx expr =
     match expr.pexp_desc with
     | Pexp_let (rec_flag, bindings, body) ->
-        (* print_expr_ast expr; *)
         let (new_ctx, new_bindings) = List.fold_left (fun (cctx, new_bindings) binding ->
-          (* print_vb_ast binding; *)
           let new_binding = self#value_binding cctx binding in
           let var_name = (binding_name new_binding) in
           let new_monitor = Option.bind var_name (fun name ->

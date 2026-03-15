@@ -13,6 +13,8 @@ depends: [
   "dune" {>= "3.20"}
   "ocaml"
   "ppx_deriving"
+  "ocaml-compiler-libs"
+  "alcotest" {with-test}
   "odoc" {with-doc}
 ]
 build: [

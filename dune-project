@@ -19,6 +19,10 @@
  (name conteff)
  (synopsis "Software Contract using Effect Handlers")
  (description "Software Contract using Effect Handlers")
- (depends ocaml ppx_deriving)
+ (depends
+   ocaml
+   ppx_deriving
+   ocaml-compiler-libs
+   (alcotest :with-test))
  (tags
   ("software contract" "effect handlers" "theory")))
