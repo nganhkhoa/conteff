@@ -175,7 +175,6 @@ let update_constraint ~loc (old_constraint : value_constraint option) : value_co
 let rec extract_pattern_type (pat : pattern) : core_type option =
   match pat.ppat_desc with
   | Ppat_constraint (_inner_pat, core_typ) ->
-      Printf.eprintf "yup, has a type constraint here\n";
       Some core_typ
 
   | Ppat_alias (inner_pat, _) ->
@@ -267,7 +266,7 @@ let expander = object (self)
      *)
     let (_, rewritten) = List.fold_left (fun (cctx, rewritten) item ->
       match item.pstr_desc with
-      | Pstr_value (recursive, [binding]) ->
+      | Pstr_value (recursive, [binding]) when Option.is_some (binding_name binding) ->
           (* this is the outermost binding *)
           let var_name = Option.get (binding_name binding) in
 
@@ -488,22 +487,17 @@ let expander = object (self)
 
   (* don't modify the context here, ctx should be modified somewhere else *)
   method! value_binding ctx vb =
-    let var_name = Option.get (binding_name vb) in
     let contract = get_contract_payload vb.pvb_attributes in
     match contract with
     | Some contract ->
         (* we don't filter out the same name here, shadow valid after this binding *)
-        Printf.eprintf "%s with contract %s (%s) current context is %s\n"
-          var_name (show_contract contract) (Option.get ctx.current) (show_rewrite_context ctx);
-          (* print_vb_ast binding; *)
+        (* let var_name = Option.get (binding_name vb) in *)
+        (* Printf.eprintf "%s with contract %s (%s) current context is %s\n"
+          var_name (show_contract contract) (Option.get ctx.current) (show_rewrite_context ctx); *)
+        (* print_vb_ast binding; *)
 
         let new_expr = self#expression ctx vb.pvb_expr in
-
-        let new_value =
         self#transform_contract_wrapper ctx contract { vb with pvb_expr = new_expr }
-        in
-        Printf.eprintf "finished %s\n" var_name;
-        new_value
 
     | None ->
         let new_expr = self#expression ctx vb.pvb_expr in
