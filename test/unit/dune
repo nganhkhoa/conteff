@@ -1,5 +1,7 @@
 (tests
- (names test_1)
+ (names
+   test_1
+   test_2)
  (preprocess (pps conteff))
  (libraries alcotest)
  (flags (:standard -w -27-32)))
