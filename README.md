@@ -29,7 +29,7 @@ opam pin add conteff git+https://github.com/yourusername/your-repo-name.git
  (preprocess (pps conteff)))
 ```
 
-Annotate the desire function/variables with contracts.
+Annotate the desire function/variables with contracts. More details in [./docs/contract-rewrite.md](./docs/contract-rewrite.md).
 
 ```ocaml
 (* bigger_0 and bigger_10 is defined correctly else compile error *)
@@ -42,6 +42,9 @@ let [@contract : bigger_0 -> bigger_10] f x = x + 10
 ## Build and test
 
 ```sh
-$ dune build
+$ dune build lib
+$ dune runtest test/unit
+
+# manual tests are defined here to test the rewritter
 $ dune describe pp test/manual/somefile.ml
 ```

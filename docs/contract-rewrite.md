@@ -8,7 +8,8 @@ let [@contract : predicate] x = value
 (* higher order contract *)
 let [@contract : predicate -> predicate] f = body
 (* dependent contract *)
-let [@contract : predicate -> predicate deps] f = body
+let [@contract : predicate -> predicate dep] f = body
+let [@contract : (predicate -> predicate dep) -> predicate dep] f = body
 (* trace contract *)
 let [@contract : predicate -> constructor predicate trace] f = body
 ```
@@ -69,6 +70,25 @@ let f pos neg cloc x y z =
 ```
 
 The function arguments and return value is "redefined" to fix their labels.
+
+
+### Dependent Contracts
+
+Based on the logic of dependent contracts, we disallow chaining them. This is similar to the type rules on dependent contracts:
+
+$$
+\Gamma \vdash e_1 : t_1\ contract \quad \Gamma \vdash e_2 : t_1 \rightarrow t_2\ contract \\
+\Gamma \vdash e_1 \rightarrow_d e_2 : (t_1 \rightarrow t_2)\ contract
+$$
+
+```ocaml
+(* disallowed *)
+let [@contract : predicate -> predicate dep -> predicate dep] f = body
+
+let [@contract : (predicate -> predicate dep) -> predicate dep] f = body
+```
+
+
 
 ## Blame Labels handling
 
