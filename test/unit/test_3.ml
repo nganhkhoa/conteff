@@ -13,7 +13,6 @@ let [@contract : bigger_10 -> total_bigger_50 dep] f (x : int) : int = x
 let must_blame who =
   Alcotest.(check_raises) "must blame" (Blame who)
 
-
 let test_blame_input () =
   (* blame the client using f *)
   must_blame "Dune__exe__Test_3.test_blame_input.(fun)" (fun () -> ignore (f 9))

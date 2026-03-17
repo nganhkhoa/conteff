@@ -385,7 +385,7 @@ let walker = object (self)
                    { vb with pvb_attributes = [attr;] }
                  in
 
-                 Utils.debug_vb_source wrapped;
+                 (* Utils.debug_vb_source wrapped; *)
 
                  (* build the shadow version
                     let p = p__c__ [@contract_arg] in
@@ -560,7 +560,7 @@ let walker = object (self)
             Location.raise_errorf ~loc:cloc
               "contract expression needs value's type annotation"
         | _ ->
-            Utils.debug_vb_source vb;
+            (* Utils.debug_vb_source vb; *)
             Location.raise_errorf ~loc:cloc
               "Invalid expression to convert into contract"
 
