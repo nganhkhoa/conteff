@@ -6,7 +6,9 @@ let bigger_20 = bigger_n 20
 let bigger_30 = bigger_n 30
 let any _ = true
 
-let [@contract : bigger_10 -> bigger_20] f (x : int) : int = x
+let total_bigger_50 x v = bigger_n 50 (x + v)
+
+let [@contract : bigger_10 -> total_bigger_50 dep] f (x : int) : int = x
 
 let must_blame who =
   Alcotest.(check_raises) "must blame" (Blame who)
@@ -14,14 +16,14 @@ let must_blame who =
 
 let test_blame_input () =
   (* blame the client using f *)
-  must_blame "Dune__exe__Test_2.test_blame_input.(fun)" (fun () -> ignore (f 9))
+  must_blame "Dune__exe__Test_3.test_blame_input.(fun)" (fun () -> ignore (f 9))
 
 let test_blame_output () =
   (* blame f the server *)
-  must_blame "Test_2" (fun () -> ignore (f 19))
+  must_blame "Test_3" (fun () -> ignore (f 25))
 
 let test_pass () =
-  Alcotest.(check int) "Equal" 21 (f 21)
+  Alcotest.(check int) "Equal" 26 (f 26)
 
 let () =
   let open Alcotest in
@@ -34,4 +36,5 @@ let () =
       test_case "output" `Quick test_blame_output;
     ];
   ]
+
 
