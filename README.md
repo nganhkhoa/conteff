@@ -7,7 +7,7 @@ This project tries to implement software contracts using effects and effect hand
 Add this project to the dune dependency.
 
 ```
-opam pin add conteff git+https://github.com/yourusername/your-repo-name.git
+opam pin add conteff git+https://github.com/nganhkhoa/conteff.git
 ```
 
 ```dune
