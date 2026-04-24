@@ -48,3 +48,25 @@ $ dune runtest test/unit
 # manual tests are defined here to test the rewritter
 $ dune describe pp test/manual/somefile.ml
 ```
+
+### ECDH Examples
+
+```sh
+$ dune build test/ecdh
+
+# some unit tests
+$ dune exec test/ecdh/test_add_points.exe
+$ dune exec test/ecdh/test_scalar_mult.exe
+$ dune exec test/ecdh/test_ecdh_protocol.exe
+
+# working server/client ECDH key exchange
+$ dune exec test/ecdh/server.exe
+$ dune exec test/ecdh/client.exe
+```
+
+Useful parameters for `server` and `client` to test:
+
+- `--malicious` will send malform point bytes
+- `--curve curvename` will change curve point generated
+
+Using these params, point decode will crash, the contract should catch.
