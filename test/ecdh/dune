@@ -1,0 +1,8 @@
+(executables
+ (names server client
+        test_add_points
+        test_scalar_mult
+        test_ecdh_protocol)
+ (libraries zarith unix)
+ (preprocess (pps conteff))
+ (flags (:standard -w -26-27-32-33-69)))
