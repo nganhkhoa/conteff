@@ -657,7 +657,7 @@ let walker = object (self)
             let monitored = List.find_opt (fun { name; _ } -> name = var_name) ctx.monitors in
             begin match monitored with
             | Some { name; typ = Scope m; } ->
-                let arg_a = Ast_builder.Default.estring ~loc m in
+                let arg_a = Ast_builder.Default.estring ~loc (m ^ "." ^ var_name) in
                 let arg_b = Ast_builder.Default.pexp_ident ~loc { txt = Lident "__FUNCTION__"; loc } in
                 let arg_c = Ast_builder.Default.estring ~loc (m ^ "." ^ name) in
 
