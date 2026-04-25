@@ -1,0 +1,6 @@
+(executable
+ (name test_merkle)
+ (libraries digestif zarith unix)
+ (preprocess (pps conteff))
+ (flags (:standard -w -26-27-32-33-69)))
+

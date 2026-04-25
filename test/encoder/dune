@@ -1,0 +1,7 @@
+(executable
+ (name test_encoder)
+ (libraries base64)
+ (preprocess (pps conteff))
+ (flags (:standard -w -26-27-32-33-69)))
+
+
