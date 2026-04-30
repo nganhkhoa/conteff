@@ -167,8 +167,12 @@ let is_fixed binding =
 
 let binding_name binding =
   match binding.pvb_pat.ppat_desc with
+  (* let x = ... *)
   | Ppat_var { txt = name; _ } -> Some name
+  (* let x : type = ... *)
   | Ppat_constraint ({ ppat_desc = Ppat_var { txt = name; _ }; _ }, _) -> Some name
+  (* let _ = ... *)
+  | Ppat_any -> Some "_"
   | _ -> None
 
 let root_module_of_loc (loc : Location.t) : string =
