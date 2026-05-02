@@ -98,9 +98,6 @@ let
 
       (* dependent contract will be provided with arguments *)
       | C'r    : (string * (int -> (int -> int) -> int) * int * int) -> int Effect.t
-
-      | C'g'p1'dep : (string * int) -> int Effect.t
-      | C'g'r'dep  : (string * int) -> int Effect.t
   end in
 
   (* contract can call effect, they have their own handler *)
@@ -117,13 +114,15 @@ let
 
   let g'p1 pos neg cloc p1 = Effect.perform (Contract.C'g'p1 (pos,p1)) in
 
+  let g'p2'p1 pos neg cloc p1 = Effect.perform (Contract.C'g'p2'p1 (pos,p1)) in
+
   (* we know this g'p2 is a function receiving one argument *)
-  let g'p2 pos neg cloc p2 = fun p1 ->
+  let g'p2'r pos neg cloc p2 = fun p1 ->
       Printf.printf "[+] calling g'p2 as wrapped version\n";
-      let p1 = Effect.perform (Contract.C'g'p2'p1 (neg,p1)) in
+      let p1 = g'p2'p1 neg pos cloc p1 in
       (* use wrapped version only *)
       let body = p2 p1 in
-      Effect.perform (Contract.C'g'p2'r (pos,body))
+      Effect.perform (Contract.C'g'p2'r (pos, body))
   in
 
   (* we know this g is a function receiving two arguments *)
@@ -134,15 +133,15 @@ let
       g'p1 neg cloc cloc p1 in
     let p1 = g'p1 neg pos cloc p1 in
 
-    let p2_dep = g'p2 neg cloc cloc p2 in
-    let p2 = g'p2 neg pos cloc p2 in
+    let p2_dep = g'p2'r neg cloc cloc p2 in
+    let p2 = g'p2'r neg pos cloc p2 in
 
     (* use wrapped version only *)
     let body = g p1 p2 in
     Effect.perform (Contract.C'g'r (pos, p1_dep (), p2_dep, body))
   in
 
-  let run_body pos neg cloc g x = fun () ->
+  let r pos neg cloc g x = fun () ->
     let x_dep = fun () -> x' neg cloc cloc x in
     let g_dep = g' neg cloc cloc g in
 
@@ -303,7 +302,7 @@ let
 
   (* nested effect approach *)
   let run_main () =
-    Effect.Deep.match_with (run_body pos neg cloc g x) ()
+    Effect.Deep.match_with (r pos neg cloc g x) ()
     {
       Effect.Deep.retc = (fun x -> x);
       exnc = (fun e -> raise e);
