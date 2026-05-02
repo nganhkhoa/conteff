@@ -1,5 +1,5 @@
 (executables
  (names main)
  (preprocess (pps conteff))
- (flags (:standard -w -26-27-32-33-38-69)))
+ (flags (:standard -w -26-27-32-33-39-38-69)))
 
