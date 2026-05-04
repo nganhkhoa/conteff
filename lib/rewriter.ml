@@ -385,177 +385,232 @@ let walker = object (self)
        we only work for body expression, for function match cases, we ignore
     *)
     | Pexp_function (params, Some (Pconstraint rettype), Pfunction_body body) ->
-        let open Tmp in
+      let arg_contracts, main_return_contract =
+        match contract with
+        | Dependent (args, ret) | Function (args, ret) -> (args, ret)
+        | Flat _ as ret -> ([], ret)
+      in
 
-        let arg_contracts, main_return_contract =
-          match contract with
-          | Dependent (args, ret) | Function (args, ret) -> (args, ret)
-          | Flat _ as ret -> ([], ret)
-        in
+      let is_main_dependent = match contract with Dependent _ -> true | _ -> false in
 
-        let extract_param_info p =
-          let rec get_info pat =
-            match pat.ppat_desc with
-            | Ppat_constraint (inner_pat, typ) ->
-                let rec get_name p_inner =
-                  match p_inner.ppat_desc with
-                  | Ppat_var { txt; _ } -> txt
-                  | Ppat_constraint (p_deep, _) -> get_name p_deep
-                  | _ -> "unknown_param"
+      let mk_ident txt = pexp_ident ~loc { txt = Lident txt; loc } in
+      let mk_var txt = ppat_var ~loc { txt; loc } in
+
+      let rec extract_name_and_type p =
+        match p.ppat_desc with
+        | Ppat_constraint (p_inner, typ) ->
+            let rec get_n inner =
+              match inner.ppat_desc with
+              | Ppat_var {txt; _} -> txt
+              | Ppat_constraint (i, _) -> get_n i
+              | _ -> "unknown"
+            in
+            (get_n p_inner, Some typ)
+        | Ppat_var {txt; _} -> (txt, None)
+        | _ -> ("unknown", None)
+      in
+
+      (* 2. Wrap the return expression first:
+            let [@contract: outpred] ret : f_type = body in ... *)
+      let ret_name = "ret" in
+      let is_ret_func_contract = match main_return_contract with Function _ | Dependent _ -> true | Flat _ -> false in
+
+      let outer_ret_expr =
+        if is_ret_func_contract then begin
+          (* Unroll the return type to dynamically generate parameters *)
+          let arg_types, final_ret_type = unroll_arrow rettype in
+          let param_names = List.mapi (fun i _ -> "ret_p" ^ string_of_int (i + 1)) arg_types in
+
+          (* Build the inner application: body ret_p1 ret_p2 *)
+          let app_args = List.map (fun pname -> (Nolabel, mk_ident pname)) param_names in
+          let body_app =
+            if app_args = [] then body
+            else pexp_apply ~loc body app_args
+          in
+
+          (* Build the function AST: fun (ret_p1 : t1) ... : final_ret_type -> body ret_p1 ... *)
+          let func_params =
+            List.map2 (fun pname ptype ->
+              let param_pat = ppat_constraint ~loc (mk_var pname) ptype in
+              { pparam_desc = Pparam_val (Nolabel, None, param_pat); pparam_loc = loc }
+            ) param_names arg_types
+          in
+
+          if func_params = [] then body
+          else { pexp_desc = Pexp_function (func_params, Some (Pconstraint final_ret_type), Pfunction_body body_app);
+                 pexp_loc = loc; pexp_loc_stack = []; pexp_attributes = [] }
+        end else begin
+          (* Flat contract: just return the body directly *)
+          body
+        end
+      in
+
+      let ret_pat = ppat_constraint ~loc (mk_var ret_name) rettype in
+
+      let ret_contract_attr =
+        { attr_name = { txt = "contract"; loc };
+          attr_payload = PTyp (contract_to_core_type ~loc main_return_contract);
+          attr_loc = loc }
+      in
+
+      let ret_app =
+        pexp_apply ~loc (mk_ident ret_name)
+          [ (Nolabel, mk_ident "pos");
+            (Nolabel, mk_ident "neg");
+            (Nolabel, mk_ident "cloc") ]
+      in
+
+      let wrapped_body =
+        pexp_let ~loc Nonrecursive
+          [ { pvb_pat = ret_pat;
+              pvb_expr = outer_ret_expr; (* Use the dynamically generated function here! *)
+              pvb_attributes = [ret_contract_attr];
+              pvb_loc = loc;
+              pvb_constraint = None } ]
+          ret_app
+      in
+
+      (* 3. Fold over original params and arg_contracts *)
+      let rec wrap_args ps cs acc_expr =
+        match ps, cs with
+        | [], [] -> acc_expr
+        | p :: ps_rest, c :: cs_rest ->
+            let pat, arg_name, arg_type_opt =
+              match p.pparam_desc with
+              | Pparam_val (_, _, pat) ->
+                  let name, typ_opt = extract_name_and_type pat in
+                  (pat, name, typ_opt)
+              | _ -> Location.raise_errorf ~loc:p.pparam_loc "Unsupported parameter format"
+            in
+            let arg_type =
+              match arg_type_opt with
+              | Some t -> t
+              | None -> Location.raise_errorf ~loc "Parameter %s must be explicitly type-annotated" arg_name
+            in
+
+            let contract_type = contract_to_core_type ~loc c in
+            let arg_contract_attr =
+              { attr_name = { txt = "contract"; loc };
+                attr_payload = PTyp contract_type;
+                attr_loc = loc }
+            in
+
+            let is_func_contract = match c with Function _ | Dependent _ -> true | Flat _ -> false in
+
+            (* 4. DYNAMIC PROXY GENERATION based on parameter signature *)
+            let outer_expr, outer_pat =
+              if is_func_contract then begin
+                (* let [@contract ...] g (g_p1 : t1) (g_p2 : t2) : t_ret = g g_p1 g_p2 *)
+                let arg_types, ret_type = unroll_arrow arg_type in
+                let param_names = List.mapi (fun i _ -> arg_name ^ "_p" ^ string_of_int (i + 1)) arg_types in
+
+                let app_args = List.map (fun pname -> (Nolabel, mk_ident pname)) param_names in
+                let g_app =
+                  if app_args = [] then mk_ident arg_name
+                  else pexp_apply ~loc (mk_ident arg_name) app_args
                 in
-                (get_name inner_pat, typ)
-            | _ -> Location.raise_errorf ~loc:p.pparam_loc
-                     "All parameters must be explicitly type-annotated (e.g., (x : int))"
-          in
+
+                let func_params =
+                  List.map2 (fun pname ptype ->
+                    let param_pat = ppat_constraint ~loc (mk_var pname) ptype in
+                    { pparam_desc = Pparam_val (Nolabel, None, param_pat); pparam_loc = loc }
+                  ) param_names arg_types
+                in
+
+                let func_expr =
+                  if func_params = [] then g_app
+                  else { pexp_desc = Pexp_function (func_params, Some (Pconstraint ret_type), Pfunction_body g_app);
+                         pexp_loc = loc; pexp_loc_stack = []; pexp_attributes = [] }
+                in
+                (func_expr, mk_var arg_name)
+              end else begin
+                (* let [@contract ...] x : x_type = x *)
+                (mk_ident arg_name, ppat_constraint ~loc (mk_var arg_name) arg_type)
+              end
+            in
+
+            (* Inner wrapper applications *)
+            let arg_app =
+              pexp_apply ~loc (mk_ident arg_name)
+                [ (Nolabel, mk_ident "neg");
+                  (Nolabel, mk_ident "pos");
+                  (Nolabel, mk_ident "cloc") ]
+            in
+            let inner_let =
+              pexp_let ~loc Nonrecursive
+                [ { pvb_pat = mk_var arg_name;
+                    pvb_expr = arg_app;
+                    pvb_attributes = [];
+                    pvb_loc = loc;
+                    pvb_constraint = None } ]
+                (wrap_args ps_rest cs_rest acc_expr)
+            in
+
+            let dep_let inner_acc =
+              if is_main_dependent then
+                let dep_name = arg_name ^ "_dep" in
+                let dep_app =
+                  pexp_apply ~loc (mk_ident arg_name)
+                    [ (Nolabel, mk_ident "neg");
+                      (Nolabel, mk_ident "cloc");
+                      (Nolabel, mk_ident "cloc") ]
+                in
+                pexp_let ~loc Nonrecursive
+                  [ { pvb_pat = mk_var dep_name;
+                      pvb_expr = dep_app;
+                      pvb_attributes = [];
+                      pvb_loc = loc;
+                      pvb_constraint = None } ]
+                  inner_acc
+              else inner_acc
+            in
+
+            (* Final outer wrapper *)
+            pexp_let ~loc Nonrecursive
+              [ { pvb_pat = outer_pat;
+                  pvb_expr = outer_expr;
+                  pvb_attributes = [arg_contract_attr];
+                  pvb_loc = loc;
+                  pvb_constraint = None } ]
+              (dep_let inner_let)
+
+        | _, _ -> Location.raise_errorf ~loc "Mismatch: number of arguments doesn't match contract definition"
+      in
+
+      let fully_wrapped_body = wrap_args params arg_contracts wrapped_body in
+
+      (* 5. Reconstruct the function with injected blame parameters *)
+      let blame_params = ["pos"; "neg"; "cloc"] in
+
+      let body_with_original_args =
+        List.fold_right (fun p acc ->
           match p.pparam_desc with
-          | Pparam_val (_, _, pat) -> get_info pat
-          | _ -> Location.raise_errorf ~loc:p.pparam_loc "Unsupported parameter format"
-        in
+          | Pparam_val (label, default_expr, pat) ->
+              pexp_fun ~loc label default_expr pat acc
+          | Pparam_newtype txt ->
+              pexp_newtype ~loc txt acc
+        ) params fully_wrapped_body
+      in
 
-        let param_infos = List.map extract_param_info params in
-        let param_names, param_types = List.split param_infos in
-        let final_rettype = rettype in
+      let final_func_expr =
+        List.fold_right (fun b_name acc ->
+          pexp_fun ~loc Nolabel None (mk_var b_name) acc
+        ) blame_params body_with_original_args
+      in
 
-        (* let () =
-          (* 1. Print the names (easy string list) *)
-          Printf.printf "\n[PPX DEBUG] Param Names: [%s]\n" (String.concat "; " param_names);
+      let recursively_transformed_expr = self#expression ctx final_func_expr in
 
-          (* 2. Convert the AST types back to readable strings and print them *)
-          let types_str =
-            List.map (fun typ ->
-              Format.asprintf "%a" Pprintast.core_type typ
-            ) param_types
-            |> String.concat "; "
-          in
-          Printf.printf "[PPX DEBUG] Param Types: [%s]\n%!" types_str
-        in *)
-        let params_info =
-          List.map2 (fun name c -> (name, c)) param_names arg_contracts
-          |> List.combine param_types
-          (* Yields: (core_type * (string * contract)) list *)
-        in
-        let main_arg_wrappers, expanded_args_lists =
-          List.map (fun (typ, (name, c)) ->
-            expand_param name [] c typ
-          ) params_info
-          |> List.split
-        in
-        let expanded_args = List.flatten expanded_args_lists in
+      { vb with pvb_expr = recursively_transformed_expr; pvb_attributes = [] }
 
-        (* 3. Expand the main return type
-           If the main function is Dependent, `C'r` gets all param_types! *)
-        let is_main_dependent = match contract with Dependent _ -> true | _ -> false in
-        let main_ret_deps = if is_main_dependent then param_types else [] in
-
-        let expanded_ret = expand_param "r" main_ret_deps main_return_contract final_rettype in
-
-        let is_main_dependent = match contract with Dependent _ -> true | _ -> false in
-        let main_ret_deps = if is_main_dependent then param_types else [] in
-
-        (* expand_param also returns a tuple here, so we unpack it! *)
-        let main_ret_wrapper, expanded_ret =
-          expand_param "r" main_ret_deps main_return_contract final_rettype
-        in
-
-        let all_expanded_params = expanded_args @ expanded_ret in
-
-        (* 4. Map the padded parameters into Effect Declarations *)
-        let string_typ = Ast_builder.Default.ptyp_constr ~loc { txt = Lident "string"; loc } [] in
-
-        let combined_effs =
-          List.map (fun ep ->
-            {
-              eff_name = ep.eff_name;
-
-              (* The payload accurately reflects: (string * [deps] * ret_type) *)
-              payload_types = string_typ :: (ep.deps @ [ep.ret_type]);
-
-              ret_type = ep.ret_type;
-            }
-          ) all_expanded_params
-        in
-
-        let other_bindings =
-          all_expanded_params
-          |> List.filter (fun ep -> ep.eff_name <> main_ret_wrapper)
-          |> List.map (generate_wrapper_binding ~loc)
-        in
-
-        (* 2. Build the custom r' binding: let r' pos neg cloc x g ... = fun () -> ... *)
-        let r_binding =
-          let open Ast_builder.Default in
-          let pos_pat = ppat_var ~loc {txt="pos"; loc}
-          and neg_pat = ppat_var ~loc {txt="neg"; loc}
-          and cloc_pat = ppat_var ~loc {txt="cloc"; loc} in
-          let param_pats = List.map (fun n -> ppat_var ~loc {txt=n; loc}) param_names in
-
-          let inner_body = wrap_main_body ~loc body
-                             param_names main_arg_wrappers param_types is_main_dependent in
-
-          (* Nest params: fun pos -> fun neg -> fun cloc -> fun x -> fun g -> fun () -> ... *)
-          let rhs = List.fold_right (fun pat acc -> pexp_fun ~loc Nolabel None pat acc)
-                      (pos_pat :: neg_pat :: cloc_pat :: param_pats)
-                      (pexp_fun ~loc Nolabel None (unit_pat ~loc) inner_body)
-          in
-          value_binding ~loc ~pat:(ppat_var ~loc {txt=main_ret_wrapper; loc}) ~expr:rhs
-        in
-
-        let all_bindings = r_binding :: other_bindings in
-
-        let start_call =
-
-          (* A. Call the gatekeeper to get the thunk: (r' pos neg cloc x g ...) *)
-          let r_thunk_call =
-            let args = List.map (fun n -> (Nolabel, pexp_ident ~loc {txt=Lident n; loc}))
-                         ("pos" :: "neg" :: "cloc" :: param_names) in
-            pexp_apply ~loc (pexp_ident ~loc {txt=Lident main_ret_wrapper; loc}) args
-          in
-
-          (* B. Build the Handler Record: { retc; exnc; effc } *)
-          let handler_record =
-            let retc_expr = pexp_fun ~loc Nolabel None (ppat_var ~loc {txt="x"; loc})
-                              (pexp_ident ~loc {txt=Lident "x"; loc}) in
-
-            let exnc_expr = pexp_fun ~loc Nolabel None (ppat_var ~loc {txt="e"; loc})
-                              (pexp_apply ~loc (pexp_ident ~loc {txt=Lident "raise"; loc})
-                                [(Nolabel, pexp_ident ~loc {txt=Lident "e"; loc})]) in
-
-            (* Assumes contract_checking is available in scope or the local module *)
-            let effc_expr = pexp_ident ~loc {txt=Lident "contract_checking"; loc} in
-
-            pexp_record ~loc [
-              ({txt = Lident "retc"; loc}, retc_expr);
-              ({txt = Lident "exnc"; loc}, exnc_expr);
-              ({txt = Lident "effc"; loc}, effc_expr);
-            ] None
-          in
-
-          (* C. Assemble: Effect.Deep.match_with <thunk> () <handler> *)
-          pexp_apply ~loc (pexp_ident ~loc {txt=Ldot(Ldot(Lident "Effect", "Deep"), "match_with"); loc}) [
-            (Nolabel, r_thunk_call);   (* The function to run *)
-            (Nolabel, unit_exp ~loc);  (* The argument to pass (the thunk's unit) *)
-            (Nolabel, handler_record)  (* The handler record *)
-          ]
-        in
-        let body_with_wrappers = pexp_let ~loc Recursive all_bindings start_call in
-        let new_body_expr = generate_contract_module ~loc combined_effs body_with_wrappers in
-
-        let new_pexp_desc =
-          Pexp_function (params, Some (Pconstraint rettype), Pfunction_body new_body_expr)
-        in
-
-        { vb with
-          pvb_expr = { vb.pvb_expr with pexp_desc = new_pexp_desc };
-          pvb_attributes = remove_contract_attributes vb.pvb_attributes;
-          pvb_constraint = update_constraint ~loc:vb.pvb_loc vb.pvb_constraint;
-        }
+      (* { vb with pvb_expr = final_func_expr; pvb_attributes = [] } *)
 
     | Pexp_function (_, None, _) ->
         Location.raise_errorf ~loc:vb.pvb_loc
           "Function must be annotated with type"
 
     | _ ->
-        let new_expr = self#expression ctx vb.pvb_expr in
+        vb
+        (* let new_expr = self#expression ctx vb.pvb_expr in
         match (vb.pvb_constraint, contract) with
         | (Some (Pvc_constraint { typ; _ }), Flat predicate) ->
             { vb with
@@ -569,5 +624,5 @@ let walker = object (self)
         | _ ->
             (* Utils.debug_vb_source vb; *)
             Location.raise_errorf ~loc:cloc
-              "Invalid expression to convert into contract"
+              "Invalid expression to convert into contract" *)
 end
