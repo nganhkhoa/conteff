@@ -5,6 +5,7 @@ open Ast_builder.Default
 
 open Annotation
 open Context
+open Utils
 
 let flat_effect_name = "V"
 let local_module_name = "Contract"
@@ -16,42 +17,18 @@ let cloc_label = "cloc"
 let effect_t loc = { txt = Ldot (Lident "Effect", "t"); loc }
 let string_t loc = Ast_builder.Default.ptyp_constr ~loc { txt = Lident "string"; loc } []
 
-(* 3. Safely extracts a variable name from complex patterns *)
-let rec extract_name_from_pat pat =
-  match pat.ppat_desc with
-  | Ppat_var { txt; _ } -> txt
-  | Ppat_constraint (inner_pat, _) -> extract_name_from_pat inner_pat
-  | Ppat_alias (inner_pat, _) -> extract_name_from_pat inner_pat
-  | Ppat_construct (_, Some (_, inner_pat)) -> extract_name_from_pat inner_pat
-  | Ppat_variant (_, Some inner_pat) -> extract_name_from_pat inner_pat
-  | _ -> "unknown_var"
 
-(* 4. Checks both the local constraint and the pattern for a type annotation *)
-let extract_type_from_vb vb =
-  match vb.pvb_constraint with
-  | Some (Pvc_constraint { typ; _ }) -> Some typ
-  | _ ->
-      let rec search_pat p =
-        match p.ppat_desc with
-        | Ppat_constraint (_, typ) -> Some typ
-        | Ppat_alias (inner_p, _) -> search_pat inner_p
-        | Ppat_construct (_, Some (_, inner_p)) -> search_pat inner_p
-        | Ppat_variant (_, Some inner_p) -> search_pat inner_p
-        | Ppat_tuple ps -> List.find_map search_pat ps
-        | _ -> None
-      in
-      search_pat vb.pvb_pat
 
-let build_flat_contract_wrapper ~loc typ variable_name predicate_name =
+let build_flat_contract_wrapper ~loc ctx typ variable_name =
   let mk_ident txt = pexp_ident ~loc { txt = Lident txt; loc } in
   let mk_var txt = ppat_var ~loc { txt; loc } in
 
+  let effect_name = ctx.scope |> List.rev |> String.concat "'" in
   let tuple_arg = pexp_tuple ~loc [ mk_ident "pos"; mk_ident variable_name ] in
-  let contract_call = pexp_apply ~loc (mk_ident ("Contract." ^ predicate_name)) [(Nolabel, tuple_arg)] in
+  let contract_call = pexp_apply ~loc (mk_ident ("Contract.Check'" ^ effect_name)) [(Nolabel, tuple_arg)] in
   let perform_expr = pexp_apply ~loc (mk_ident "Effect.perform") [(Nolabel, contract_call)] in
 
   let blame_params = ["pos"; "neg"; "cloc"] in
-  (* Return the raw function expression without attaching attributes here *)
   List.fold_right (fun b_name acc ->
     pexp_fun ~loc Nolabel None (mk_var b_name) acc
   ) blame_params perform_expr
@@ -282,73 +259,6 @@ let walker = object (self)
         let mapped_body = self#expression new_ctx body in
         { expr with pexp_desc = Pexp_let (rec_flag, List.rev new_bindings, mapped_body) }
 
-    (* | Pexp_ident { txt = Lident var_name; loc } ->
-        (* an identifier is also an expression
-           with the context.scope we know the current scope
-           context.monitors helps identifying if it should be appended with blame labels
-         *)
-        let loc = expr.pexp_loc in
-
-        let contract_kind =
-          List.find_map (fun attr ->
-            match attr.attr_name.txt with
-            | contract_arg_anno -> Some contract_arg_anno
-            | contract_dep_anno -> Some contract_dep_anno
-            | contract_ret_anno -> Some contract_ret_anno
-            | _ -> None
-          ) expr.pexp_attributes
-        in
-
-        begin match contract_kind with
-        | Some kind ->
-            let clean_attrs = remove_contract_attributes expr.pexp_attributes in
-            let clean_expr = { expr with pexp_attributes = clean_attrs } in
-
-            let mk_ident name = Ast_builder.Default.pexp_ident ~loc
-              { txt = Lident name; loc } in
-
-            let arg_a, arg_b, arg_c =
-              match kind with
-              | k when k = contract_arg_anno
-                -> (mk_ident "neg", mk_ident "pos", mk_ident "cloc")
-              | k when k = contract_dep_anno
-                -> (mk_ident "neg", mk_ident "cloc", mk_ident "cloc")
-              | k when k = contract_ret_anno
-                -> (mk_ident "pos", mk_ident "neg", mk_ident "cloc")
-              | _ ->
-                Location.raise_errorf ~loc "Annotation?"
-            in
-
-            let args_list = [
-              (Nolabel, arg_a);
-              (Nolabel, arg_b);
-              (Nolabel, arg_c);
-            ] in
-            Ast_builder.Default.pexp_apply ~loc clean_expr args_list
-
-        | None ->
-            let monitored = List.find_opt (fun { name; _ } -> name = var_name) ctx.monitors in
-            begin match monitored with
-            | Some { name; typ = Scope m; _ } ->
-                let arg_a = Ast_builder.Default.estring ~loc (m ^ "." ^ var_name) in
-                let arg_b = Ast_builder.Default.pexp_ident ~loc { txt = Lident "__FUNCTION__"; loc } in
-                let arg_c = Ast_builder.Default.estring ~loc (m ^ "." ^ name) in
-
-                let args_list = [
-                  (Nolabel, arg_a);
-                  (Nolabel, arg_b);
-                  (Nolabel, arg_c);
-                ] in
-                Ast_builder.Default.pexp_apply ~loc expr args_list
-
-            | Some { name; typ = Nested parent; _ } ->
-                Location.raise_errorf ~loc "Unsupported nested contract"
-
-            | _ ->
-                super#expression ctx expr
-            end
-        end *)
-
     | _ -> super#expression ctx expr
 
 
@@ -388,7 +298,6 @@ let walker = object (self)
       let mk_ident txt = pexp_ident ~loc { txt = Lident txt; loc } in
       let mk_var txt = ppat_var ~loc { txt; loc } in
 
-      (* 2. The unified wrapper generator *)
       let build_wrapper (config : Config.t) acc_inner =
         let is_func_contract = match config.contract with Function _ | Dependent _ -> true | Flat _ -> false in
         let contract_core_type = contract_to_core_type ~loc config.contract in
@@ -416,11 +325,9 @@ let walker = object (self)
               ) param_names arg_types
             in
 
-            (* CRITICAL FIX: Ensure the constraint is wrapped correctly for the match *)
             let func_expr =
               if func_params = [] then app
               else
-                (* This matches Pexp_function (params, Some (Pconstraint ret_typ), ...) *)
                 pexp_function ~loc func_params (Some (Pconstraint ret_typ)) (Pfunction_body app)
             in
             (* let g = fun ... in *)
@@ -457,7 +364,6 @@ let walker = object (self)
           else next_expr
         in
 
-        (* Ensure the outer pattern also has the OCaml type constraint *)
         let typed_outer_pat =
            ppat_constraint ~loc (mk_var config.name) config.typ
         in
@@ -471,22 +377,8 @@ let walker = object (self)
           (dep_let inner_let)
       in
 
-      (* 3. Build configurations for all variables *)
-      let extract_name_and_type p =
-      match p.ppat_desc with
-        | Ppat_constraint (p_inner, typ) ->
-            let rec get_n inner = match inner.ppat_desc with
-              | Ppat_var {txt; _} -> txt
-              | Ppat_constraint (i, _) -> get_n i
-              | _ -> "unknown"
-            in (get_n p_inner, Some typ)
-        | Ppat_var {txt; _} -> (txt, None)
-        | _ -> ("unknown", None)
-      in
-
       let arg_configs =
         List.map2 (fun p c ->
-          (* FIXED: Destructure as a 2-tuple (name, type_opt) *)
           let arg_name, arg_type_opt =
             match p.pparam_desc with
             | Pparam_val (_, _, pat) -> extract_name_and_type pat
@@ -522,7 +414,6 @@ let walker = object (self)
         List.fold_right build_wrapper all_configs (mk_ident "ret")
       in
 
-      (* 5. Reconstruct the final function signature *)
       let blame_params = ["pos"; "neg"; "cloc"] in
 
       let body_with_original_args =
@@ -539,7 +430,7 @@ let walker = object (self)
         ) blame_params body_with_original_args
       in
 
-      (* 6. Trigger recursion down the new AST *)
+      let var_name = extract_name_from_pat vb.pvb_pat in
       let recursively_transformed_expr = self#expression ctx final_func_expr in
 
       { vb with pvb_expr = recursively_transformed_expr; pvb_attributes = remove_contract_attributes vb.pvb_attributes }
@@ -549,29 +440,28 @@ let walker = object (self)
           "Function must be annotated with type"
 
     | _ ->
-        let new_expr = self#expression ctx vb.pvb_expr in
+        (* let new_expr = self#expression ctx vb.pvb_expr in *)
 
         let vb_typ = extract_type_from_vb vb in
         match (vb_typ, contract) with
         | (Some typ, Flat predicate) ->
           let var_name = extract_name_from_pat vb.pvb_pat in
-
-          (* Generates the clean expression: fun pos neg cloc -> Effect.perform ... *)
-          let perform_expr = build_flat_contract_wrapper ~loc typ var_name predicate in
+          let perform_expr = build_flat_contract_wrapper ~loc ctx typ var_name in
 
           let recursively_transformed_expr = self#expression ctx perform_expr in
 
-          (* Build the [@do_contract : predicate] attribute here *)
+          let effect_name = ctx.scope |> List.rev |> String.concat "'" in
           let do_contract_attr =
             let mk_ident txt = pexp_ident ~loc { txt = Lident txt; loc } in
+            let mk_typ txt = ptyp_constr ~loc { txt = Lident txt; loc } [] in
+            let payload_typ = ptyp_tuple ~loc [mk_typ predicate; mk_typ effect_name] in
             { attr_name = { txt = "do_contract"; loc };
-              attr_payload = PStr [ { pstr_desc = Pstr_eval (mk_ident predicate, []); pstr_loc = loc } ];
+              attr_payload = PTyp payload_typ;
               attr_loc = loc }
           in
 
           { vb with
             pvb_expr = recursively_transformed_expr;
-            (* Prepend the new attribute while stripping the old [@contract] attribute *)
             pvb_attributes = do_contract_attr :: (remove_contract_attributes vb.pvb_attributes);
             pvb_constraint = None;
           }
