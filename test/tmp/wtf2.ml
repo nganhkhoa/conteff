@@ -1,30 +1,4 @@
-exception Blame of string
-
-module Contract = struct
-type _ Effect.t +=
-  | Flat : (string * ('a -> bool) * 'a) -> 'a Effect.t
-
-let rec contract_checking : type a b.
-  a Effect.t
-  -> ((a, b) Effect.Deep.continuation -> b) option
-  = fun eff ->
-  let open Effect.Deep in
-  match eff with
-  | Flat (label, check, arg) ->
-      Some (fun k ->
-        if check arg
-        then continue k arg
-        else discontinue k (Blame label))
-  | _ -> None
-end
-
-let run_with_effects thunk =
-  Effect.Deep.match_with thunk ()
-  {
-    Effect.Deep.retc = (fun x -> x);
-    exnc = (fun e -> raise e);
-    effc = Contract.contract_checking;
-  }
+open Conteff_lib
 
 let check_x v =
   Printf.printf "check_x %d\n" v;
@@ -92,7 +66,7 @@ let f pos neg cloc (x : int) (g : (int -> int) -> int) : (int -> int) =
       p1_ret_wrap pos neg cloc
     in
 
-    let p1_dep = fun p1 -> run_with_effects (fun () ->
+    let p1_dep = fun p1 -> Contract.run_with_effects (fun () ->
       Printf.printf "run g_p1_dep with effects\n";
       (p1_wrap neg cloc cloc) p1)
     in
@@ -103,7 +77,7 @@ let f pos neg cloc (x : int) (g : (int -> int) -> int) : (int -> int) =
     r_wrap pos neg cloc
   in
 
-  let g_dep = fun p1 -> run_with_effects (fun () ->
+  let g_dep = fun p1 -> Contract.run_with_effects (fun () ->
     Printf.printf "run g_dep with effects\n";
     (g_wrap neg cloc cloc) p1)
   in
@@ -150,4 +124,4 @@ let main = fun () ->
   ()
 
 let () =
-  run_with_effects main
+  Contract.run_with_effects main

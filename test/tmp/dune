@@ -1,5 +1,6 @@
 (executables
- (names main retfunc global wtf)
+ (names main retfunc global wtf wtf2 try try2 try_compiled try2_compiled use_lib)
+ (libraries conteff_lib)
  (preprocess (pps conteff))
  (flags (:standard -w -26-27-32-33-39-38-69)))
 
