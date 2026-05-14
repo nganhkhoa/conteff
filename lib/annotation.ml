@@ -26,16 +26,9 @@ let contract_arg_anno = contract_anno ^ "_arg"
 let contract_ret_anno = contract_anno ^ "_ret"
 let contract_dep_anno = contract_anno ^ "_dep"
 
-(* we keep the location of the flat contract
-   so that when we use it to check predicate
-   it can type check and throw the error at predicate
-   idk about function contract though ?
-   redesign when needed
-
-   maybe all of them need location?
- *)
 type contract =
   | Flat of string
+  | Tuple of contract list
   | Dependent of contract list * contract
   | Function of contract list * contract
   [@@deriving show]
@@ -73,12 +66,20 @@ let rec parse_contract_type (ct : core_type) : contract =
       let args, ret = extract_func_args_and_ret inner_ct in
       Dependent (args, ret)
 
-  (* 2. Function Contract: Standard arrow *)
+  (* 2. Ignore other aliases transparently (e.g. `as 'tup`) *)
+  | Ptyp_alias (inner_ct, _) ->
+      parse_contract_type inner_ct
+
+  (* 3. Function Contract: Standard arrow *)
   | Ptyp_arrow (Nolabel, _, _) ->
       let args, ret = extract_func_args_and_ret ct in
       Function (args, ret)
 
-  (* 3. Basic Contract: Flat identifier *)
+  (* 4. Tuple Contract: Multiple elements *)
+  | Ptyp_tuple args ->
+      Tuple (List.map parse_contract_type args)
+
+  (* 5. Basic Contract: Flat identifier *)
   | Ptyp_constr ({ txt = Lident name; _ }, []) ->
       Flat name
 
@@ -148,6 +149,10 @@ let rec contract_to_core_type ~loc (c : contract) : core_type =
   match c with
   | Flat name ->
       mk_ct (Ptyp_constr (mk_loc (Longident.Lident name), []))
+
+  | Tuple elements ->
+      let tuple_elements = List.map (contract_to_core_type ~loc) elements in
+      mk_ct (Ptyp_tuple tuple_elements)
 
   | Function (args, ret) ->
       let lhs = build_args args in
