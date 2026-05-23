@@ -1,9 +1,13 @@
 (executables
  (names
    main retfunc global wtf wtf2
+   recursive
    try try2 try_compiled try2_compiled
    use_lib box vector
-   tuple tuple_compiled)
+   tuple tuple_compiled
+   global_state
+   global_state_2
+   )
  (libraries conteff_lib)
  (preprocess (pps conteff))
  (flags (:standard -w -26-27-32-33-39-38-69)))
