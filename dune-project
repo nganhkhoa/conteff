@@ -20,9 +20,8 @@
  (synopsis "Software Contract using Effect Handlers")
  (description "Software Contract using Effect Handlers")
  (depends
-   ocaml
-   ppx_deriving
-   ocaml-compiler-libs
+   (ocaml (>= 5.0))
+   ppxlib
    (alcotest :with-test))
  (tags
   ("software contract" "effect handlers" "theory")))

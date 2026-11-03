@@ -1,0 +1,6 @@
+(executable
+ (name pp)
+ (libraries conteff ppxlib))
+
+(cram
+ (deps pp.exe))

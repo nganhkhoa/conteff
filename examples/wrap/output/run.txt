@@ -1,0 +1,3 @@
+handler around creation: blame: party=client, contract=positive -> positive
+handler around application: result: -1
+default run around application: blame: party=client, contract=positive -> positive

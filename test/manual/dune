@@ -1,4 +1,0 @@
-(library
- (name test_manual)
- (preprocess (pps conteff))
- (flags (:standard -w -11-26-27-32-33-34-35-36-37-38-39)))

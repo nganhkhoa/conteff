@@ -1,0 +1,7 @@
+(executable
+ (public_name cesk)
+ (name main)
+ (libraries sexplib)
+ (preprocess (pps ppx_deriving.show conteff))
+ ; ignore unused
+ (flags (:standard -w -26-27-32-33-34-35-37-39)))

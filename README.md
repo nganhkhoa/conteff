@@ -15,7 +15,7 @@ opam pin add conteff git+https://github.com/nganhkhoa/conteff.git
 (package
  (name your_package)
  (depends
-  (ocaml (>= 4.14.0))
+  (ocaml (>= 5.0))
   (dune (>= 3.0))
   (conteff)
  ))
@@ -29,39 +29,71 @@ opam pin add conteff git+https://github.com/nganhkhoa/conteff.git
  (preprocess (pps conteff)))
 ```
 
-Annotate the desire function/variables with contracts. More details in [./docs/contract-rewrite.md](./docs/contract-rewrite.md).
+Annotate bindings with contracts, or monitor expressions directly. More details are in
+[./docs/contract-rewrite.md](./docs/contract-rewrite.md).
 
 ```ocaml
-(* bigger_0 and bigger_10 is defined correctly else compile error *)
+let is_pos x = x > 0
 
-let [@contract : bigger_0] x = 1
+(* flat, function, dependent, tuple, box contracts *)
+let[@contract is_pos] x : int = 1
+let[@contract is_pos @-> is_pos] f x = x + 10
+let[@contract dep is_pos (fun x -> fun r -> r > x)] g x = x + 1
 
-let [@contract : bigger_0 -> bigger_10] f x = x + 10
+(* the formal (mon k l j κ e) *)
+let h = [%mon (is_pos @-> is_pos) ~pos:"server" ~neg:"client" ~loc:"h"] (fun x -> x)
+
+(* run under the global handler; violations raise Conteff_lib.Contract.Blame *)
+let () = Conteff_lib.Contract.run (fun () -> print_int (f 1))
+
+(* hijack the checks in the dynamic extent of an expression *)
+let y = [%hijack] (f (-1))                         (* checks skipped *)
+let z = [%hijack Conteff_lib.Contract.warn report] (f (-1))
 ```
 
 ## Build and test
 
 ```sh
-$ dune build lib
-$ dune runtest test/unit
+$ dune build lib src
+$ dune test tests/unit tests/expand
 
-# manual tests are defined here to test the rewritter
-$ dune describe pp test/manual/somefile.ml
+# show what the ppx produces for a file
+$ dune exec tests/expand/pp.exe -- --impl tests/unit/test_let.ml
 ```
 
-### ECDH Examples
+`tests/unit` holds the Alcotest suites. `tests/expand` holds cram tests of the ppx output
+for each compile rule. Runnable programs are under `examples/`; the previous implementation
+is kept under `legacy/` and is not built.
+
+### Handler-placement example
+
+`examples/wrap/input.ml` contrasts a handler around creation of a protected function with
+a handler around its application. Its generated PPX code and runtime output are checked in:
+
+- `examples/wrap/output/expanded.ml`
+- `examples/wrap/output/run.txt`
+
+Regenerate them with:
 
 ```sh
-$ dune build test/ecdh
+$ dune exec tests/expand/pp.exe -- --impl examples/wrap/input.ml \
+    > examples/wrap/output/expanded.ml
+$ dune exec examples/wrap/input.exe > examples/wrap/output/run.txt
+```
+
+### ECDH Example
+
+```sh
+$ dune build examples/ecdh
 
 # some unit tests
-$ dune exec test/ecdh/test_add_points.exe
-$ dune exec test/ecdh/test_scalar_mult.exe
-$ dune exec test/ecdh/test_ecdh_protocol.exe
+$ dune exec examples/ecdh/test_add_points.exe
+$ dune exec examples/ecdh/test_scalar_mult.exe
+$ dune exec examples/ecdh/test_ecdh_protocol.exe
 
 # working server/client ECDH key exchange
-$ dune exec test/ecdh/server.exe
-$ dune exec test/ecdh/client.exe
+$ dune exec examples/ecdh/server.exe
+$ dune exec examples/ecdh/client.exe
 ```
 
 Useful parameters for `server` and `client` to test:
@@ -70,3 +102,56 @@ Useful parameters for `server` and `client` to test:
 - `--curve curvename` will change curve point generated
 
 Using these params, point decode will crash, the contract should catch.
+
+### Shallow handlers and contract-controlled state
+
+`Conteff_lib.Contract` now uses `Effect.Shallow`, explicitly reinstalling the
+handler when resuming. The previous deep runtime is preserved unchanged as
+`Conteff_lib.Contract_deep` (its effects and blame exception are distinct from
+those of `Contract`; PPX-generated monitors still use `Contract`).
+
+Stateful predicates use `Contract.get_state ()` and `Contract.set_state n`.
+Install the state-aware check handler around **function applications**, not
+only around construction of the contracted function:
+
+```ocaml
+let increasing_input input =
+  let previous = Contract.get_state () in
+  if input < previous then false
+  else (Contract.set_state input; true)
+
+let[@contract increasing_input @-> Contract.any] f x = x + 100
+
+let result = Contract.with_state ~initial:0 (fun () ->
+  let a = f 2 in
+  let b = f 5 in
+  (a, b))
+```
+
+`with_state` discards final state; `with_state_result` returns `(result, state)`.
+The initial integer is an explicit prior input for an input-history contract.
+State is passed through handler answers rather than a mutable reference.
+Nested checks in predicates run under the same state protocol and their updates
+reach both the enclosing predicate and the resumed program. Ordinary `run` and
+policy handlers retain their prior enforcement behavior; for shared predicate
+state, use `with_state` directly rather than installing an intervening policy
+handler. State operations without a state handler are unhandled effects.
+
+A false predicate injects `Blame` at the monitor with the predicate's final
+state. If the predicate itself raises an exception, it is also injected at the
+monitor. Predicate evaluation, branch selection, and continuation resumption
+share one handler scope, so state updates before either failure remain visible
+to code that catches the exception. State is not rolled back.
+
+Run the state tests and the increment example:
+
+```sh
+dune exec tests/unit/test_state.exe
+dune exec examples/state/increment.exe
+# Results: (11, 21)
+# Calls: 2
+```
+
+The increment example's function returns `x + 1`; its always-true domain
+predicate also increments the state exactly once per call. The codomain is
+unrestricted, avoiding an extra counter update for the result check.

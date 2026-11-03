@@ -1,0 +1,5 @@
+(executables
+ (names tree chain)
+ (libraries multicont)
+ (flags (:standard -w -26-27-32-33-69)))
+

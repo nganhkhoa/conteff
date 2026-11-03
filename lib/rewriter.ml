@@ -1,666 +1,305 @@
-open Effect
+(* Surface forms handled by the ppx:
+
+   [%mon c ~pos:"k" ~neg:"l" ~loc:"j"] e
+       The formal (mon k l j c e). Labels are optional.
+
+   let[@contract c] x = e      (also let rec, local lets, nested modules)
+       x is monitored with pos = loc = the qualified name of x. Each use of x
+       in the same compilation unit becomes a monitor whose neg label is the
+       definition that contains the use, so clients are blamed precisely.
+       At the top level of a module, x is also exported with neg "external".
+
+   [%hijack] e  /  [%hijack policy] e
+       Run e under a custom handler for contract checks (C-Hijack of
+       redex/compiler3.rkt). Without a policy, checks are skipped. *)
+
 open Ppxlib
-open Ast_helper
 open Ast_builder.Default
 
-open Annotation
-open Context
-open Utils
+type env = {
+  root : string;                      (* compilation unit name *)
+  path : string list;                 (* enclosing modules/definitions, innermost first *)
+  protected : (string * string) list; (* contracted name -> its monitor function *)
+}
 
-let flat_effect_name = "V"
-let local_module_name = "Contract"
+let empty = { root = ""; path = []; protected = [] }
 
-let pos_label = "pos"
-let neg_label = "neg"
-let cloc_label = "cloc"
+let root_of_loc (loc : Location.t) =
+  match loc.loc_start.pos_fname with
+  | "" | "_none_" -> "Unknown"
+  | f -> f |> Filename.basename |> Filename.remove_extension |> String.capitalize_ascii
 
-let effect_t loc = { txt = Ldot (Lident "Effect", "t"); loc }
-let string_t loc = Ast_builder.Default.ptyp_constr ~loc { txt = Lident "string"; loc } []
+let label env = String.concat "." (env.root :: List.rev env.path)
 
+let enter name env = { env with path = name :: env.path }
 
-let build_flat_contract_wrapper ~loc ctx typ check_name deps variable_name =
-  let mk_ident txt = pexp_ident ~loc { txt = Lident txt; loc } in
-  let mk_var txt = ppat_var ~loc { txt; loc } in
+let bound_vars =
+  object
+    inherit [string list] Ast_traverse.fold as super
 
-  (* 3. Apply dependent args to checking function if any exist *)
-  let check_base = mk_ident check_name in
-  let check_expr =
-    if deps = [] then check_base
-    else pexp_apply ~loc check_base (List.map (fun d -> (Nolabel, mk_ident d)) deps)
-  in
+    method! pattern p acc =
+      let acc = super#pattern p acc in
+      match p.ppat_desc with
+      | Ppat_var { txt; _ } | Ppat_alias (_, { txt; _ }) -> txt :: acc
+      | _ -> acc
+  end
 
-  (* 2. Construct Contract.Flat (pos, check_expr, value) *)
-  let pos_arg = mk_ident "pos" in
-  let val_arg = mk_ident variable_name in
-  let flat_constr = pexp_construct ~loc
-    { txt = Ldot (Lident "Contract", "Flat"); loc }
-    (Some (pexp_tuple ~loc [pos_arg; check_expr; val_arg]))
-  in
-  let perform_id = pexp_ident ~loc { txt = Ldot (Lident "Effect", "perform"); loc } in
-  let perform_expr = pexp_apply ~loc perform_id [(Nolabel, flat_constr)] in
+let unprotect names env =
+  { env with protected = List.filter (fun (x, _) -> not (List.mem x names)) env.protected }
 
-  let blame_params = ["pos"; "neg"; "cloc"] in
-  List.fold_right (fun b_name acc ->
-    pexp_fun ~loc Nolabel None (mk_var b_name) acc
-  ) blame_params perform_expr
+let unprotect_pat p env = unprotect (bound_vars#pattern p []) env
 
-let build_tuple_contract_wrapper ~loc ctx typ contract_list var_name =
-  let mk_ident txt = pexp_ident ~loc { txt = Lident txt; loc } in
-  let mk_var txt = ppat_var ~loc { txt; loc } in
+let contract_of_vb vb =
+  List.find_map
+    (fun a ->
+      if a.attr_name.txt = "contract" then Some (Syntax.of_payload ~loc:a.attr_loc a.attr_payload)
+      else None)
+    vb.pvb_attributes
 
-  let _, core_typ = unroll_arrow typ in
-  let core_typ =
-    match core_typ.ptyp_desc with
+let without_contract_attr vb =
+  { vb with pvb_attributes = List.filter (fun a -> a.attr_name.txt <> "contract") vb.pvb_attributes }
 
-    (* Match `Box.t` OR `Conteff_lib.Box.t` *)
-    | Ptyp_constr ({ txt = Ldot (Lident "Box", "t") | Ldot (Ldot (Lident "Conteff_lib", "Box"), "t"); _ }, [inner_typ]) ->
-        let unit_typ = ptyp_constr ~loc { txt = Lident "unit"; loc } [] in
-        let getter_typ = ptyp_arrow ~loc Nolabel unit_typ inner_typ in
-        let setter_typ = ptyp_arrow ~loc Nolabel inner_typ unit_typ in
-        { core_typ with ptyp_desc = Ptyp_tuple [getter_typ; setter_typ] }
-
-    (* Match `Vector.t` OR `Conteff_lib.Vector.t` *)
-    | Ptyp_constr ({ txt = Ldot (Lident "Vector", "t") | Ldot (Ldot (Lident "Conteff_lib", "Vector"), "t"); _ }, [inner_typ]) ->
-        let unit_typ = ptyp_constr ~loc { txt = Lident "unit"; loc } [] in
-        let int_typ = ptyp_constr ~loc { txt = Lident "int"; loc } [] in
-
-        (* getter: int -> 'a *)
-        let getter_typ = ptyp_arrow ~loc Nolabel int_typ inner_typ in
-
-        (* setter: int -> 'a -> unit *)
-        let setter_typ = ptyp_arrow ~loc Nolabel int_typ (ptyp_arrow ~loc Nolabel inner_typ unit_typ) in
-
-        { core_typ with ptyp_desc = Ptyp_tuple [getter_typ; setter_typ] }
-
-    | _ -> core_typ
-  in
-
-  let tuple_types = match core_typ.ptyp_desc with
-    | Ptyp_tuple typs -> typs
-    | _ -> Location.raise_errorf ~loc "Type mismatch: contract specifies a Tuple, but type annotation is not a tuple."
-  in
-  if List.length tuple_types <> List.length contract_list then
-    Location.raise_errorf ~loc "Tuple arity mismatch: contract has %d components, but type has %d."
-      (List.length contract_list) (List.length tuple_types);
-
-  let comp_names = List.mapi (fun i _ -> var_name ^ "_" ^ string_of_int i) contract_list in
-  let final_tup_expr = pexp_tuple ~loc (List.map mk_ident comp_names) in
-  let combined = List.combine comp_names (List.combine tuple_types contract_list) in
-
-  let inner_body = List.fold_right (fun (comp_name, (comp_typ, comp_contract)) acc_expr ->
-    let contract_attr = {
-      attr_name = { txt = "contract"; loc };
-      attr_payload = PTyp (contract_to_core_type ~loc comp_contract);
-      attr_loc = loc
-    } in
-
-    let pat = ppat_constraint ~loc (mk_var comp_name) comp_typ in
-    let app_blames = pexp_apply ~loc (mk_ident comp_name) [
-      (Nolabel, mk_ident "pos"); (Nolabel, mk_ident "neg"); (Nolabel, mk_ident "cloc")
-    ] in
-
-    let num_args = match comp_contract with
-      | Function (args, _) | Dependent (args, _) -> List.length args
-      | Flat _ | Tuple _ -> 0
-    in
-
-    let rhs_expr =
-      if num_args = 0 then mk_ident comp_name
-      else
-        let arg_types, ret_typ = unroll_n_arrows ~loc num_args comp_typ in
-        let param_names = List.mapi (fun i _ -> comp_name ^ "_p" ^ string_of_int (i + 1)) arg_types in
-
-        let app_args = List.map (fun p -> (Nolabel, mk_ident p)) param_names in
-        let app_expr = pexp_apply ~loc (mk_ident comp_name) app_args in
-
-        let func_params = List.map2 (fun p t ->
-          let p_pat = ppat_constraint ~loc (mk_var p) t in
-          { pparam_desc = Pparam_val (Nolabel, None, p_pat); pparam_loc = loc }
-        ) param_names arg_types in
-
-        pexp_function ~loc func_params (Some (Pconstraint ret_typ)) (Pfunction_body app_expr)
-    in
-
-    (* 1. Emit simple destructuring binding with the [@contract] attribute *)
-    pexp_let ~loc Nonrecursive
-      [ { pvb_pat = pat;
-          pvb_expr = rhs_expr;
-          pvb_attributes = [contract_attr];
-          pvb_loc = loc;
-          pvb_constraint = None } ] (* FIXED HERE *)
-      (* 2. Apply the runtime blames to it *)
-      (pexp_let ~loc Nonrecursive
-          [ { pvb_pat = pat;
-              pvb_expr = app_blames;
-              pvb_attributes = [];
-              pvb_loc = loc;
-              pvb_constraint = None } ] (* FIXED HERE *)
-          acc_expr)
-  ) combined final_tup_expr
-  in
-
-  let tup_pat = ppat_tuple ~loc (List.map mk_var comp_names) in
-  let destructure_expr = pexp_let ~loc Nonrecursive
-    [ { pvb_pat = tup_pat;
-        pvb_expr = mk_ident var_name;
-        pvb_attributes = [];
-        pvb_loc = loc;
-        pvb_constraint = None } ] (* FIXED HERE *)
-    inner_body
-  in
-
-  let blame_params = ["pos"; "neg"; "cloc"] in
-  List.fold_right (fun b_name acc ->
-    pexp_fun ~loc Nolabel None (mk_var b_name) acc
-  ) blame_params destructure_expr
-
-let rec deep_eta_expand ~loc expr typ prefix =
-  (* Helper to unroll `t1 -> t2 -> t3` into a list of arguments `[t1; t2]` and a return `t3` *)
-  let rec get_args t =
-    match t.ptyp_desc with
-    | Ptyp_arrow (lbl, t_arg, t_ret) ->
-        let args, final_ret = get_args t_ret in
-        ((lbl, t_arg) :: args, final_ret)
-    | _ -> ([], t)
-  in
-
-  let args, ret_typ = get_args typ in
-  match args with
-  | [] -> expr (* Base case: it's a flat type. No expansion needed. *)
-  | _ ->
-      (* 1. Build the applied arguments. If an argument is a function, recurse! *)
-      let applied_args =
-        List.mapi (fun i (lbl, t_arg) ->
-          let arg_name = prefix ^ "_" ^ string_of_int (i + 1) in
-          let arg_ident = Ast_builder.Default.pexp_ident ~loc { txt = Lident arg_name; loc } in
-
-          (* RECURSION: Expands nested functions like g_1_1 *)
-          let expanded_arg = deep_eta_expand ~loc arg_ident t_arg arg_name in
-
-          (lbl, expanded_arg)
-        ) args
-      in
-
-      (* 2. Apply the base expression to our newly expanded arguments: `g g_1` *)
-      let app_expr = Ast_builder.Default.pexp_apply ~loc expr applied_args in
-
-      (* 3. Build the parameters for the new function: `(g_1 : t1)` *)
-      let params =
-        List.mapi (fun i (lbl, t_arg) ->
-          let arg_name = prefix ^ "_" ^ string_of_int (i + 1) in
-          let inner_pat = Ast_builder.Default.ppat_var ~loc { txt = arg_name; loc } in
-          let typed_pat = Ast_builder.Default.ppat_constraint ~loc inner_pat t_arg in
-
-          { pparam_desc = Pparam_val (lbl, None, typed_pat); pparam_loc = loc }
-        ) args
-      in
-
-      (* 4. Construct the function with the return constraint: `fun (...) : t2 -> ...` *)
-      Ast_builder.Default.pexp_function ~loc params
-        (Some (Pconstraint ret_typ))
-        (Pfunction_body app_expr)
-
-let prepend_monitor_types ~loc old_typ =
-  List.fold_right (fun _ acc_typ ->
-    Ast_builder.Default.ptyp_arrow ~loc Nolabel (string_t loc) acc_typ
-  ) [pos_label; neg_label; cloc_label] old_typ
-
-(* The main function to update the value_constraint option *)
-let update_constraint ~loc (old_constraint : value_constraint option) : value_constraint option =
-  match old_constraint with
-  | Some (Pvc_constraint c) ->
-      Some (Pvc_constraint { c with typ = prepend_monitor_types ~loc c.typ })
-
-  | Some (Pvc_coercion c) ->
-      Some (Pvc_coercion { c with coercion = prepend_monitor_types ~loc c.coercion })
-
-  | None -> None
-
-let rec extract_pattern_type (pat : pattern) : core_type option =
-  match pat.ppat_desc with
-  | Ppat_constraint (_inner_pat, core_typ) ->
-      Some core_typ
-
-  | Ppat_alias (inner_pat, _) ->
-      extract_pattern_type inner_pat
-
-  | _ ->
-      None
-
-let has_attribute (attr_name_to_find : string) (vb : value_binding) : bool =
-  List.exists (fun attr ->
-    attr.attr_name.txt = attr_name_to_find
-  ) vb.pvb_attributes
-
-let is_fixed binding =
-  (* TODO: do better check, we know that contract attributes == fixed
-     but we want to remove the contract attribute after rewrite
-   *)
-  match get_contract_payload binding.pvb_attributes with
-  | Some _ -> true
-  | _ -> false
-
-let binding_name binding =
-  match binding.pvb_pat.ppat_desc with
-  (* let x = ... *)
-  | Ppat_var { txt = name; _ } -> Some name
-  (* let x : type = ... *)
-  | Ppat_constraint ({ ppat_desc = Ppat_var { txt = name; _ }; _ }, _) -> Some name
-  (* let _ = ... *)
-  | Ppat_any -> None
+let rec var_of_pat p =
+  match p.ppat_desc with
+  | Ppat_var { txt; _ } -> Some txt
+  | Ppat_constraint (p, _) -> var_of_pat p
   | _ -> None
 
-let root_module_of_loc (loc : Location.t) : string =
-  let fname = loc.loc_start.pos_fname in
-  if fname = "" || fname = "_none_" then
-    "Unknown"
-  else
-    fname
-    |> Filename.basename
-    |> Filename.remove_extension
-    |> String.capitalize_ascii
+let rec rename_pat p name =
+  match p.ppat_desc with
+  | Ppat_var v -> { p with ppat_desc = Ppat_var { v with txt = name } }
+  | Ppat_constraint (q, t) -> { p with ppat_desc = Ppat_constraint (rename_pat q name, t) }
+  | _ -> p
 
+let estring ~loc s = pexp_constant ~loc (Pconst_string (s, loc, None))
 
-let walker = object (self)
-  inherit [Context.t] Ast_traverse.map_with_context as super
+(* A contracted binding x = e becomes
+     raw  = e
+     monx = fun neg -> mon "path.x" neg "path.x" c raw *)
+type contracted = {
+  name : string;
+  raw : string;
+  monf : string;
+  contract : Syntax.t;
+  vb : value_binding;
+}
 
-  method! module_binding ctx mb =
-    let mod_name =
-      match mb.pmb_name.txt with
-      | Some name -> name
-      | None -> "Anonymous"
-    in
-    Printf.printf "[rewriter] current module is %s\n" mod_name;
-    let new_current = match ctx.current with
-      | Some n -> n ^ "." ^ mod_name
-      | None -> mod_name
-    in
-    let scope = mod_name :: ctx.scope in
-    let new_ctx = { ctx with current = Some new_current; scope = scope; } in
-    super#module_binding new_ctx mb
+let analyse vb =
+  match contract_of_vb vb with
+  | None -> None
+  | Some contract -> (
+      match var_of_pat vb.pvb_pat with
+      | None ->
+          Location.raise_errorf ~loc:vb.pvb_loc
+            "[@contract] can only annotate a binding of a single variable"
+      | Some name ->
+          Some
+            { name;
+              raw = Codegen.gensym ("raw_" ^ name ^ "_");
+              monf = Codegen.gensym ("mon_" ^ name ^ "_");
+              contract;
+              vb = without_contract_attr vb })
 
-  method! structure ctx items =
-    (* everything in OCaml is a module, so the file is parsed as a module
-       every module has a list of structure items
-       the item where we interested in is a Pstr_value which has a list of bindings
-       the logic of the bindings is similar to the expression
-     *)
+let use_site ~loc env monf = Codegen.app ~loc (Codegen.evar ~loc monf) [ estring ~loc (label env) ]
 
-    let (_, rewritten) = List.fold_left (fun (cctx, rewritten) item ->
-      match item.pstr_desc with
-      (* ignore recursive and multiple let *)
-      | Pstr_value (recursive, bindings) ->
+let split_labels (e : expression) =
+  match e.pexp_desc with
+  | Pexp_apply (f, args) ->
+      let is_label = function
+        | Labelled ("pos" | "neg" | "loc"), _ -> true
+        | _ -> false
+      in
+      let labels, rest = List.partition is_label args in
+      let find l = List.find_map (function Labelled l', v when l = l' -> Some v | _ -> None) labels in
+      let c = if rest = [] then f else { e with pexp_desc = Pexp_apply (f, rest) } in
+      (c, find "pos", find "neg", find "loc")
+  | _ -> (e, None, None, None)
 
-          (* if recursive we have to fetch all possible protected name
-             and put it in the context, only top level (these bindings)
-             contracts inside is in a different scope
-           *)
-          let new_monitors =
-            List.filter_map (fun binding ->
-              match (binding_name binding, is_fixed binding) with
-              | (Some name, true) ->
-                let scope_str = cctx.scope |> List.rev |> String.concat "'" in
-                Some { name; scope = scope_str; typ = Scope "teehee" }
-              | _ -> None
-            ) bindings
+let loc_label (loc : Location.t) =
+  Printf.sprintf "%s:%d" (Filename.basename loc.loc_start.pos_fname) loc.loc_start.pos_lnum
+
+let rewriter =
+  object (self)
+    inherit [env] Ast_traverse.map_with_context as super
+
+    (* names bound by a group of bindings, and the env their bodies see *)
+    method private rhs_env env rec_flag (items : (contracted option * value_binding) list) =
+      let plain = List.filter_map (fun (c, vb) -> if c = None then Some vb.pvb_pat else None) items in
+      let plain_names = List.concat_map (fun p -> bound_vars#pattern p []) plain in
+      match rec_flag with
+      | Nonrecursive -> env
+      | Recursive ->
+          let env = unprotect plain_names env in
+          let added = List.filter_map (fun (c, _) -> Option.map (fun c -> (c.name, c.monf)) c) items in
+          { env with protected = added @ env.protected }
+
+    method private after_env env (items : (contracted option * value_binding) list) =
+      List.fold_left
+        (fun env (c, vb) ->
+          match c with
+          | Some c -> { (unprotect [ c.name ] env) with protected = (c.name, c.monf) :: env.protected }
+          | None -> unprotect_pat vb.pvb_pat env)
+        env items
+
+    (* the bindings replacing a group: raw values (and plain bindings) in
+       the first group, monitor functions in the second *)
+    method private expand env rec_flag vbs =
+      let items = List.map (fun vb -> (analyse vb, vb)) vbs in
+      let renv = self#rhs_env env rec_flag items in
+      let map_rhs vb =
+        let env' = match var_of_pat vb.pvb_pat with Some n -> enter n renv | None -> renv in
+        self#expression env' vb.pvb_expr
+      in
+      let values =
+        List.map
+          (fun (c, vb) ->
+            match c with
+            | Some c -> { c.vb with pvb_pat = rename_pat c.vb.pvb_pat c.raw; pvb_expr = map_rhs c.vb }
+            | None -> self#value_binding renv vb)
+          items
+      in
+      let monitors =
+        List.filter_map
+          (fun (c, _) ->
+            Option.map
+              (fun c ->
+                let loc = c.vb.pvb_loc in
+                let me = label (enter c.name env) in
+                let neg = Codegen.gensym "neg" in
+                let body =
+                  Codegen.monitor ~loc ~pos:(estring ~loc me) ~neg:(Codegen.evar ~loc neg)
+                    ~cl:(estring ~loc me) c.contract (Codegen.evar ~loc c.raw)
+                in
+                value_binding ~loc ~pat:(Codegen.pvar ~loc c.monf) ~expr:(Codegen.fun_ ~loc neg body))
+              c)
+          items
+      in
+      let contracted = List.filter_map fst items in
+      (items, values, monitors, contracted)
+
+    method! structure env items =
+      let env =
+        if env.root = "" then
+          match items with
+          | i :: _ -> { env with root = root_of_loc i.pstr_loc }
+          | [] -> env
+        else env
+      in
+      let _, out =
+        List.fold_left
+          (fun (env, acc) item ->
+            match item.pstr_desc with
+            | Pstr_value (rec_flag, vbs) when List.exists (fun vb -> contract_of_vb vb <> None) vbs ->
+                let loc = item.pstr_loc in
+                let items, values, monitors, contracted = self#expand env rec_flag vbs in
+                let defs =
+                  match rec_flag with
+                  | Recursive -> [ pstr_value ~loc Recursive (values @ monitors) ]
+                  | Nonrecursive ->
+                      [ pstr_value ~loc Nonrecursive values; pstr_value ~loc Nonrecursive monitors ]
+                in
+                (* exported under the original name, for other modules *)
+                let exports =
+                  List.map
+                    (fun c ->
+                      let use = Codegen.app ~loc (Codegen.evar ~loc c.monf) [ estring ~loc "external" ] in
+                      let expr =
+                        if Codegen.is_function_contract c.contract then
+                          let a = Codegen.gensym "a" in
+                          Codegen.fun_ ~loc a (Codegen.app ~loc use [ Codegen.evar ~loc a ])
+                        else use
+                      in
+                      let vb = value_binding ~loc ~pat:(Codegen.pvar ~loc c.name) ~expr in
+                      let unused_ok =
+                        attribute ~loc ~name:{ txt = "warning"; loc }
+                          ~payload:(PStr [ pstr_eval ~loc (estring ~loc "-32") [] ])
+                      in
+                      pstr_value ~loc Nonrecursive [ { vb with pvb_attributes = [ unused_ok ] } ])
+                    contracted
+                in
+                (self#after_env env items, List.rev_append (defs @ exports) acc)
+            | Pstr_value (rec_flag, vbs) ->
+                let items = List.map (fun vb -> (None, vb)) vbs in
+                let renv = self#rhs_env env rec_flag items in
+                let vbs = List.map (self#value_binding renv) vbs in
+                (self#after_env env items, { item with pstr_desc = Pstr_value (rec_flag, vbs) } :: acc)
+            | _ -> (env, self#structure_item env item :: acc))
+          (env, []) items
+      in
+      List.rev out
+
+    method! module_binding env mb =
+      let name = Option.value mb.pmb_name.txt ~default:"_" in
+      super#module_binding (enter name env) mb
+
+    method! value_binding env vb =
+      let env = match var_of_pat vb.pvb_pat with Some n -> enter n env | None -> env in
+      super#value_binding env vb
+
+    method! case env c = super#case (unprotect_pat c.pc_lhs env) c
+
+    method! expression env e =
+      let loc = e.pexp_loc in
+      match e.pexp_desc with
+      | Pexp_ident { txt = Lident x; _ } when List.mem_assoc x env.protected ->
+          use_site ~loc env (List.assoc x env.protected)
+      | Pexp_let (rec_flag, vbs, body) when List.exists (fun vb -> contract_of_vb vb <> None) vbs ->
+          let items, values, monitors, _ = self#expand env rec_flag vbs in
+          let body = self#expression (self#after_env env items) body in
+          (match rec_flag with
+           | Recursive -> pexp_let ~loc Recursive (values @ monitors) body
+           | Nonrecursive -> pexp_let ~loc Nonrecursive values (pexp_let ~loc Nonrecursive monitors body))
+      | Pexp_let (rec_flag, vbs, body) ->
+          let items = List.map (fun vb -> (None, vb)) vbs in
+          let renv = self#rhs_env env rec_flag items in
+          let vbs = List.map (self#value_binding renv) vbs in
+          { e with pexp_desc = Pexp_let (rec_flag, vbs, self#expression (self#after_env env items) body) }
+      | Pexp_function (params, constr, body) ->
+          let env, params =
+            List.fold_left
+              (fun (env, ps) p ->
+                match p.pparam_desc with
+                | Pparam_val (l, def, pat) ->
+                    let def = Option.map (self#expression env) def in
+                    (unprotect_pat pat env, { p with pparam_desc = Pparam_val (l, def, pat) } :: ps)
+                | Pparam_newtype _ -> (env, p :: ps))
+              (env, []) params
           in
-
-          let new_bindings = List.map (fun binding ->
-            let monitors = match recursive with
-            | Recursive -> new_monitors @ cctx.monitors
-            | Nonrecursive -> cctx.monitors
-            in
-            self#value_binding {cctx with monitors = monitors } binding
-          ) bindings
+          let body =
+            match body with
+            | Pfunction_body b -> Pfunction_body (self#expression env b)
+            | Pfunction_cases (cs, l, a) -> Pfunction_cases (List.map (self#case env) cs, l, a)
           in
-
-          let new_item = { item with pstr_desc = Pstr_value (recursive, new_bindings) } in
-          ({cctx with monitors = new_monitors @ cctx.monitors}, new_item :: rewritten)
-      | _ ->
-          let mapped_item = self#structure_item cctx item in
-          (cctx, mapped_item :: rewritten)
-    ) (ctx, []) items
-    in
-    List.rev rewritten
-
-  (* don't modify the context here, ctx should be modified somewhere else *)
-  method! value_binding ctx vb =
-    let contract = get_contract_payload vb.pvb_attributes in
-    match contract with
-    | Some contract ->
-        Printf.printf "%s\n" (show_contract contract);
-        self#transform_contract_wrapper ~cloc:vb.pvb_loc ctx contract vb
-    | _ ->
-      let new_expr = self#expression ctx vb.pvb_expr in
-      { vb with pvb_expr = new_expr }
-      (* Location.raise_errorf ~loc:vb.pvb_loc "Contract cannot be parsed correctly" *)
-
-  method! expression ctx expr =
-    match expr.pexp_desc with
-    | Pexp_let (rec_flag, bindings, body) ->
-        (* OCaml AST is [binding], process by their define order
-           transform the binding recursively, once a let
-           binding with a contract will be processed
-           the variable protected name+scope is kept in monitor list
-           when the identifier is used, it will be appended with blame labels
-           this works for in-module reference only
-           cross-files blame assignment is done by blame assignment pass
-         *)
-
-        let (new_ctx, new_bindings) = List.fold_left (fun (cctx, new_bindings) binding ->
-          (* binding body is always processed but the monitor list may not updated
-             if the binding is an anonymous binding (let _ = ...)
-           *)
-
-          let var_name_maybe = binding_name binding in
-          let new_scope = match var_name_maybe with
-          | Some name -> name :: cctx.scope
-          | None -> "_" :: cctx.scope
+          { e with pexp_desc = Pexp_function (List.rev params, constr, body) }
+      | Pexp_for (pat, lo, hi, dir, body) ->
+          let benv = unprotect_pat pat env in
+          { e with
+            pexp_desc =
+              Pexp_for (pat, self#expression env lo, self#expression env hi, dir, self#expression benv body) }
+      (* [%mon c ~pos ~neg ~loc] e *)
+      | Pexp_apply ({ pexp_desc = Pexp_extension ({ txt = "mon"; _ }, payload); _ }, [ (Nolabel, arg) ]) ->
+          let c, pos, neg, cl =
+            match payload with
+            | PStr [ { pstr_desc = Pstr_eval (c, _); _ } ] -> split_labels c
+            | _ -> Location.raise_errorf ~loc "[%%mon c] expects a contract"
           in
-          let transformed = self#value_binding { cctx with scope = new_scope } binding in
-
-          (* update the monitor list if we have the variable
-             ignore shadowing, everything is kept
-           *)
-
-          match var_name_maybe with
-          | Some name ->
-              let scope_str = cctx.scope |> List.rev |> String.concat "'" in
-              let monitor = {
-                name; scope = scope_str; typ = Variable;
-              } in
-              ({cctx with monitors = monitor :: cctx.monitors}, transformed :: new_bindings)
-          | None ->
-            (cctx, transformed :: new_bindings)
-        ) (ctx, []) bindings in
-
-        (* transform the body of the let expression with new context collected
-           after tranforming all bindings
-         *)
-        let mapped_body = self#expression new_ctx body in
-        { expr with pexp_desc = Pexp_let (rec_flag, List.rev new_bindings, mapped_body) }
-
-    | _ -> super#expression ctx expr
-
-
-  method transform_contract_wrapper ~cloc ctx contract (vb : value_binding) =
-    let loc = vb.pvb_loc in
-
-    let padded_pat = match vb.pvb_pat.ppat_desc with
-      | Ppat_constraint (p, typ) ->
-          let string_typ = ptyp_constr ~loc { txt = Lident "string"; loc } [] in
-          let padded_typ = List.fold_right (fun _ acc -> ptyp_arrow ~loc Nolabel string_typ acc) ["pos"; "neg"; "cloc"] typ in
-          ppat_constraint ~loc p padded_typ
-      | _ -> vb.pvb_pat
-    in
-
-    match vb.pvb_expr.pexp_desc with
-    | Pexp_function (params, Some (Pconstraint rettype), Pfunction_body raw_body) ->
-      let module Config = struct
-        type t = {
-          name : string;
-          blames : string list;
-          is_dep : bool;
-          contract : contract;
-          typ : core_type;
-          target_expr : expression;
-          deps : string list;
-        }
-      end in
-      let open Config in
-
-      let arg_contracts, main_return_contract =
-        match contract with
-        | Dependent (args, ret) | Function (args, ret) -> (args, ret)
-        | Flat _ | Tuple _ as ret -> ([], ret)
-      in
-      let is_main_dependent = match contract with Dependent _ -> true | _ -> false in
-
-      let mk_ident txt = pexp_ident ~loc { txt = Lident txt; loc } in
-      let mk_var txt = ppat_var ~loc { txt; loc } in
-
-      let build_wrapper (config : Config.t) acc_inner =
-        let is_func_contract = match config.contract with Function _ | Dependent _ -> true | Flat _ | Tuple _ -> false in
-
-        let base_contract_core_type = contract_to_core_type ~loc config.contract in
-        let contract_core_type =
-          match config.contract with
-          | Dependent _ ->
-              { ptyp_desc = Ptyp_alias (base_contract_core_type, { Location.txt = "dep"; loc });
-                ptyp_loc = loc; ptyp_loc_stack = []; ptyp_attributes = [] }
-          | _ -> base_contract_core_type
-        in
-
-        let contract_attr =
-          { attr_name = { txt = "contract"; loc };
-            attr_payload = PTyp contract_core_type;
-            attr_loc = loc }
-        in
-
-        let outer_expr, outer_pat =
-          if is_func_contract then begin
-            let num_args_in_contract =
-              match config.contract with
-              | Function (args, _) | Dependent (args, _) -> List.length args
-              | Flat _ | Tuple _ -> 0
-            in
-            let arg_types, ret_typ = unroll_n_arrows ~loc num_args_in_contract config.typ in
-
-            let param_names = List.mapi (fun i _ -> config.name ^ "_p" ^ string_of_int (i + 1)) arg_types in
-
-            let app_args = List.map (fun pname -> (Nolabel, mk_ident pname)) param_names in
-            let app =
-              if app_args = [] then config.target_expr
-              else pexp_apply ~loc config.target_expr app_args
-            in
-
-            let func_params =
-              List.map2 (fun pname ptype ->
-                let param_pat = ppat_constraint ~loc (mk_var pname) ptype in
-                { pparam_desc = Pparam_val (Nolabel, None, param_pat); pparam_loc = loc }
-              ) param_names arg_types
-            in
-
-            let func_expr =
-              if func_params = [] then app
-              else pexp_function ~loc func_params (Some (Pconstraint ret_typ)) (Pfunction_body app)
-            in
-            (func_expr, mk_var config.name)
-          end else begin
-            (config.target_expr, ppat_constraint ~loc (mk_var config.name) config.typ)
-          end
-        in
-
-        let typed_inner_pat = ppat_constraint ~loc (mk_var config.name) config.typ in
-        let blame_args = List.map (fun b -> (Nolabel, mk_ident b)) config.blames in
-        let arg_app = pexp_apply ~loc (mk_ident config.name) blame_args in
-
-        let inner_let =
-          pexp_let ~loc Nonrecursive
-            [ { pvb_pat = typed_inner_pat; pvb_expr = arg_app; pvb_attributes = []; pvb_loc = loc; pvb_constraint = None } ]
-            acc_inner
-        in
-
-        let dep_let next_expr =
-          if config.is_dep then
-            let dep_name = config.name ^ "_dep" in
-            let arg_types, _ = unroll_arrow config.typ in
-            let param_names = List.mapi (fun i _ -> "p" ^ string_of_int (i + 1)) arg_types in
-
-            let base_args = [ (Nolabel, mk_ident "neg"); (Nolabel, mk_ident "cloc"); (Nolabel, mk_ident "cloc") ] in
-            let extra_args = List.map (fun p -> (Nolabel, mk_ident p)) param_names in
-            let full_app = pexp_apply ~loc (mk_ident config.name) (base_args @ extra_args) in
-
-            let unit_pat = ppat_construct ~loc {txt = Lident "()"; loc} None in
-            let thunk_expr = pexp_fun ~loc Nolabel None unit_pat full_app in
-
-            let run_with_effects_id = pexp_ident ~loc { txt = Ldot (Lident "Contract", "run_with_effects"); loc } in
-            let run_expr = pexp_apply ~loc run_with_effects_id [(Nolabel, thunk_expr)] in
-
-            let final_dep_expr =
-              List.fold_right (fun pname acc ->
-                pexp_fun ~loc Nolabel None (mk_var pname) acc
-              ) param_names run_expr
-            in
-
-            let dep_pat = ppat_constraint ~loc (mk_var dep_name) config.typ in
-            pexp_let ~loc Nonrecursive
-              [ { pvb_pat = dep_pat; pvb_expr = final_dep_expr; pvb_attributes = []; pvb_loc = loc; pvb_constraint = None } ]
-              next_expr
-          else next_expr
-        in
-
-        let typed_outer_pat = ppat_constraint ~loc (mk_var config.name) config.typ in
-
-        let rec extract_preds = function
-          | Flat p -> [p]
-          | Function (args, ret) | Dependent (args, ret) ->
-              let arg_preds = List.map extract_preds args |> List.flatten in
-              arg_preds @ (extract_preds ret)
-          | Tuple contracts ->
-              List.map extract_preds contracts |> List.flatten
-        in
-
-        let with_applied_checks next_expr =
-          if config.deps = [] then next_expr
-          else
-            let predicates = extract_preds config.contract |> List.sort_uniq String.compare in
-            let dep_args = List.map (fun d -> (Nolabel, mk_ident d)) config.deps in
-
-            List.fold_right (fun pred_name acc_expr ->
-              let pred_id = mk_ident pred_name in
-              let pred_app = pexp_apply ~loc pred_id dep_args in
-              let pred_pat = mk_var pred_name in
-              pexp_let ~loc Nonrecursive
-                [ { pvb_pat = pred_pat; pvb_expr = pred_app; pvb_attributes = []; pvb_loc = loc; pvb_constraint = None } ]
-                acc_expr
-            ) predicates next_expr
-        in
-
-        with_applied_checks (
-          pexp_let ~loc Nonrecursive
-            [ { pvb_pat = typed_outer_pat; pvb_expr = outer_expr; pvb_attributes = [contract_attr];
-                pvb_loc = loc; pvb_constraint = None } ]
-            (dep_let inner_let)
-        )
-      in
-
-      let combined_args =
-        let len_p = List.length params in
-        let len_c = List.length arg_contracts in
-        if len_p <> len_c then
-          let var_name = extract_name_from_pat vb.pvb_pat in
-          Location.raise_errorf ~loc
-            "Contract arity mismatch for '%s': function code provides %d parameters, but contract specifies %d arguments."
-            var_name len_p len_c
-        else
-          List.combine params arg_contracts
-      in
-
-      let arg_configs, final_deps =
-        List.fold_left (fun (acc_configs, acc_deps) (p, c) ->
-          let arg_name, arg_type_opt =
-            match p.pparam_desc with
-            | Pparam_val (_, _, pat) -> extract_name_and_type pat
-            | _ -> Location.raise_errorf ~loc:p.pparam_loc "Unsupported parameter"
+          let c = Syntax.of_expression (self#expression env c) in
+          let lab d = function Some l -> self#expression env l | None -> estring ~loc d in
+          Codegen.monitor ~loc ~pos:(lab "server" pos) ~neg:(lab "client" neg)
+            ~cl:(lab (loc_label loc) cl) c (self#expression env arg)
+      | Pexp_extension ({ txt = "mon"; _ }, _) ->
+          Location.raise_errorf ~loc "[%%mon c] must be applied to an expression: [%%mon c] e"
+      (* [%hijack] e / [%hijack policy] e *)
+      | Pexp_apply ({ pexp_desc = Pexp_extension ({ txt = "hijack"; _ }, payload); _ }, [ (Nolabel, arg) ]) ->
+          let policy =
+            match payload with
+            | PStr [] -> Codegen.runtime ~loc "Contract" "unchecked"
+            | PStr [ { pstr_desc = Pstr_eval (p, _); _ } ] -> self#expression env p
+            | _ -> Location.raise_errorf ~loc "[%%hijack policy] expects a policy expression"
           in
-          let arg_type = match arg_type_opt with
-            | Some t -> t
-            | None -> Location.raise_errorf ~loc "Missing type annotation for %s" arg_name
-          in
-          let config = {
-            name = arg_name; blames = ["neg"; "pos"; "cloc"]; is_dep = is_main_dependent;
-            contract = c; typ = arg_type; target_expr = mk_ident arg_name; deps = [];
-          } in
-          let new_deps = if is_main_dependent then (arg_name ^ "_dep") :: acc_deps else acc_deps in
-          (config :: acc_configs, new_deps)
-        ) ([], []) combined_args
-      in
-      let arg_configs = List.rev arg_configs in
-      let final_deps = List.rev final_deps in
-
-      let ret_config = {
-        name = "ret"; blames = ["pos"; "neg"; "cloc"]; is_dep = false;
-        contract = main_return_contract; typ = rettype; target_expr = mk_ident "ret"; deps = final_deps;
-      } in
-
-      let ret_wrapped = build_wrapper ret_config (mk_ident "ret") in
-
-      let body_bound =
-        pexp_let ~loc Nonrecursive
-          [ { pvb_pat = mk_var "ret"; pvb_expr = raw_body; pvb_attributes = []; pvb_loc = loc; pvb_constraint = None } ]
-          ret_wrapped
-      in
-
-      let fully_wrapped_body = List.fold_right build_wrapper arg_configs body_bound in
-
-      let blame_params = ["pos"; "neg"; "cloc"] in
-      let body_with_original_args =
-        List.fold_right (fun p acc ->
-          match p.pparam_desc with
-          | Pparam_val (label, def_expr, pat) -> pexp_fun ~loc label def_expr pat acc
-          | Pparam_newtype txt -> pexp_newtype ~loc txt acc
-        ) params fully_wrapped_body
-      in
-
-      let final_func_expr =
-        List.fold_right (fun b_name acc ->
-          pexp_fun ~loc Nolabel None (mk_var b_name) acc
-        ) blame_params body_with_original_args
-      in
-
-      let recursively_transformed_expr = self#expression ctx final_func_expr in
-      { vb with
-        pvb_pat = padded_pat;
-        pvb_expr = recursively_transformed_expr;
-        pvb_attributes = remove_contract_attributes vb.pvb_attributes }
-
-    | Pexp_function (_, None, _) ->
-        Location.raise_errorf ~loc:vb.pvb_loc "Function must be annotated with type"
-
-    | _ ->
-        let vb_typ = extract_type_from_vb vb in
-        match (vb_typ, contract) with
-        | (Some typ, Flat predicate) ->
-          let var_name = extract_name_from_pat vb.pvb_pat in
-
-          (* Now passes empty deps list for simple base variables *)
-          let perform_expr = build_flat_contract_wrapper ~loc ctx typ predicate [] var_name in
-          let recursively_transformed_expr = self#expression ctx perform_expr in
-
-          let effect_name = ctx.scope |> List.rev |> String.concat "'" in
-          let do_contract_attr =
-            let mk_ident txt = pexp_ident ~loc { txt = Lident txt; loc } in
-            let mk_typ txt = ptyp_constr ~loc { txt = Lident txt; loc } [] in
-            let payload_typ = ptyp_tuple ~loc [mk_typ predicate; mk_typ effect_name] in
-            { attr_name = { txt = "do_contract"; loc };
-              attr_payload = PTyp payload_typ;
-              attr_loc = loc }
-          in
-
-          { vb with
-              pvb_pat = padded_pat;
-            pvb_expr = recursively_transformed_expr;
-            pvb_attributes = remove_contract_attributes vb.pvb_attributes;
-            pvb_constraint = None;
-          }
-
-        | (Some typ, Tuple contract_list) ->
-            let var_name = extract_name_from_pat vb.pvb_pat in
-            let tuple_expr = build_tuple_contract_wrapper ~loc ctx typ contract_list var_name in
-            let recursively_transformed_expr = self#expression ctx tuple_expr in
-
-            { vb with
-              pvb_pat = padded_pat;
-              pvb_expr = recursively_transformed_expr;
-              pvb_attributes = remove_contract_attributes vb.pvb_attributes;
-              pvb_constraint = None;
-            }
-
-        | (None, Flat _) ->
-            Location.raise_errorf ~loc:cloc
-              "contract expression needs value's type annotation (checked pattern and binding)"
-        | _ ->
-            Utils.debug_vb_source vb;
-            Location.raise_errorf ~loc:cloc "Invalid expression to convert into contract"
-end
+          Codegen.app ~loc (Codegen.runtime ~loc "Contract" "with_policy")
+            [ policy; pexp_fun ~loc Nolabel None (punit ~loc) (self#expression env arg) ]
+      | Pexp_extension ({ txt = "hijack"; _ }, _) ->
+          Location.raise_errorf ~loc "[%%hijack] must be applied to an expression: [%%hijack] e"
+      | _ -> super#expression env e
+  end

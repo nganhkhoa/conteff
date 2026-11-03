@@ -1,0 +1,4 @@
+(executable
+ (name input)
+ (preprocess (pps conteff))
+ (libraries conteff.lib))
