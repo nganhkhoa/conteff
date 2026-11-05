@@ -52,8 +52,8 @@ let f = e in fun x -> let y = mon l j j κ1 x in mon k l j κ2 (f (mon l k j κ1
 means:
 
 - `Contract.run` is the global handler (`wrap` in the formal model). It runs the predicate
-  under a fresh `run`, then resumes with the value or raises `Blame` at the monitor.
-- When no handler is installed, `check` falls back to the same behaviour.
+  and continuation under the handler, resuming with the value or raising `Blame` at the monitor.
+- When no handler is installed, `check` raises `Effect.Unhandled`.
 - `[%hijack] e` and `[%hijack policy] e` install a handler around `e` (C-Hijack in
   `redex/compiler3.rkt`). `Contract.unchecked` skips checks. `enforce`, `warn`,
   `observe`, `reassign` and `delegate` are other policies. A user-written

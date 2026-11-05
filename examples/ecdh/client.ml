@@ -8,7 +8,8 @@ let server_addr = ref "127.0.0.1:8080"
 let malicious = ref false
 let curve_id = ref "secp256k1"
 
-let () =
+let%contract_main () =
+
   let specs = [
     ("--server", Arg.Set_string server_addr, " Server IP:PORT");
     ("--malicious", Arg.Set malicious, " Send malicious off-curve point");

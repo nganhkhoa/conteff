@@ -7,15 +7,14 @@
    only thing left at runtime is: who handles [Check]?
 
    - [run] is the global/default handler (`wrap` in redex/compiler.rkt):
-     it runs the predicate under a fresh default handler and either resumes
+     it handles the predicate and continuation together and either resumes
      with the value or raises [Blame] at the monitor.
    - [with_policy] installs a user handler for the dynamic extent of a thunk.
      Because checks are unhandled effects at the monitor, the nearest handler
      decides what a check means: this is how a client can hijack checks
      (redex/compiler3.rkt, rule C-Hijack).
 
-   When no handler is installed at all, [check] falls back to the default
-   behaviour, as if the whole program ran under [run]. *)
+   Without a handler, [check] raises [Effect.Unhandled]. *)
 
 type label = string
 
@@ -32,7 +31,7 @@ let () =
 type _ Effect.t +=
   | Check : { pos : label; loc : label; pred : 'a -> bool; value : 'a } -> 'a Effect.t
 
-(* The default policy for one check, used by [run] and the fallback. *)
+(* The default policy for one check, used by [enforce]. *)
 let rec enforce_one : 'a. pos:label -> loc:label -> ('a -> bool) -> 'a -> 'a =
   fun ~pos ~loc pred value ->
   if run (fun () -> pred value) then value
@@ -51,17 +50,25 @@ and run : 'a. (unit -> 'a) -> 'a =
         match eff with
         | Check { pos; loc; pred; value } ->
             Some (fun (k : (b, a) continuation) ->
-              match enforce_one ~pos ~loc pred value with
-              | v -> continue_with k v (handler ())
-              | exception e -> discontinue_with k e (handler ()))
+              (* Handle the predicate and the resumed continuation together. *)
+              let bare =
+                { retc = Fun.id; exnc = raise; effc = (fun _ -> None) } in
+              continue_with
+                (fiber (fun () ->
+                   match pred value with
+                   | true -> continue_with k value bare
+                   | false ->
+                       discontinue_with k
+                         (Blame { party = pos; contract = loc }) bare
+                   | exception e -> discontinue_with k e bare))
+                () (handler ()))
         | _ -> None) }
   in
   continue_with (fiber thunk) () (handler ())
 
 (* Emitted by the ppx for every flat contract: perform 𝒞 (pred, value). *)
 let check ~pos ~loc pred value =
-  try Effect.perform (Check { pos; loc; pred; value })
-  with Effect.Unhandled (Check _) -> enforce_one ~pos ~loc pred value
+  Effect.perform (Check { pos; loc; pred; value })
 
 (* ---------- custom handlers ---------- *)
 

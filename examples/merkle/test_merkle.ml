@@ -4,7 +4,8 @@ let sha256_hasher s =
 let broken_hasher s =
   Bytes.of_string (s ^ "_too_short")
 
-let () =
+let%contract_main () =
+
   let data = ["block_0"; "block_1"; "block_2"; "block_3"] in
 
   Printf.printf "Building tree with valid SHA256 hasher...\n%!";

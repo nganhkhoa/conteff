@@ -1,4 +1,4 @@
-(executable
- (name increment)
+(executables
+ (names increment multiple increasing)
  (preprocess (pps conteff))
  (libraries conteff.lib))

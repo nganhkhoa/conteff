@@ -122,13 +122,14 @@ let increasing_input input =
 
 let[@contract increasing_input @-> Contract.any] f x = x + 100
 
-let result = Contract.with_state ~initial:0 (fun () ->
+let result = [%contract_main_state 0] (
   let a = f 2 in
   let b = f 5 in
   (a, b))
 ```
 
-`with_state` discards final state; `with_state_result` returns `(result, state)`.
+`[%contract_main_state initial]` expands to `with_state`
+and discards final state; `with_state_result` returns `(result, state)`.
 The initial integer is an explicit prior input for an input-history contract.
 State is passed through handler answers rather than a mutable reference.
 Nested checks in predicates run under the same state protocol and their updates
@@ -155,3 +156,38 @@ dune exec examples/state/increment.exe
 The increment example's function returns `x + 1`; its always-true domain
 predicate also increments the state exactly once per call. The codomain is
 unrestricted, avoiding an extra counter update for the result check.
+
+### Multiple named contract states
+
+An optional whole-file pass supports independently typed state slots and a
+single shallow handler for both state operations and contract checks:
+
+```ocaml
+[%%contract_states
+  let calls : int = 0
+  and last : string = ""]
+
+let count name =
+  [%contract_set_calls ([%contract_get_calls] + 1)];
+  [%contract_set_last name];
+  true
+
+let[@contract count @-> Contract.any] greet name = "Hello " ^ name
+
+let () = [%contract_main_states] (
+  ignore (greet "Ada");
+  Printf.printf "%d: %s\n" [%contract_get_calls] [%contract_get_last])
+```
+
+Use an OCaml structure extension and underscore names: hyphens in the proposed
+extension names are parsed as subtraction by OCaml. Each slot requires an
+explicit type. Declare the slots before their uses, once per module; the pass
+operates on one compilation unit and does not discover states across files.
+Initializers run once per invocation, in declaration order, and the handler
+returns the body result (discarding the final states). Read final values inside
+the body when needed. State operations outside the generated handler are
+unhandled. The existing `[%contract_main_state initial]` remains available for
+single integer state.
+
+For a full reference to the macro syntax, expansions, state handlers, and blame
+labels, see [docs/macros.md](docs/macros.md).

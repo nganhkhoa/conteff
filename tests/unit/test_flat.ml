@@ -48,9 +48,9 @@ let contract_in_predicate () =
   check_party "pred-body" (fun () -> [%mon p ~pos:"k"] 1)
 
 let no_handler_installed () =
-  Alcotest.(check int) "pass" 3 ([%mon is_pos] 3);
-  Alcotest.check_raises "fail" (Contract.Blame { party = "k"; contract = "j" })
-    (fun () -> ignore ([%mon is_pos ~pos:"k" ~loc:"j"] 0))
+  match [%mon is_pos] 3 with
+  | _ -> Alcotest.fail "expected unhandled Check"
+  | exception Effect.Unhandled (Contract.Check _) -> ()
 
 let () =
   Alcotest.run "flat"

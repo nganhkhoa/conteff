@@ -25,8 +25,8 @@ let increasing_calls () =
 
 let equal_calls () =
   let f = [%mon (increasing_input @-> Contract.any)] Fun.id in
-  let result = Contract.with_state ~initial:0 (fun () ->
-    let a = f 3 in let b = f 3 in (a, b)) in
+  let result = [%contract_main_state 0]
+    (let a = f 3 in let b = f 3 in (a, b)) in
   Alcotest.(check (pair int int)) "equal allowed" (3, 3) result
 
 let decreasing_calls () =
@@ -34,8 +34,8 @@ let decreasing_calls () =
     ~pos:"server" ~neg:"client" ~loc:"inputs"] Fun.id in
   Alcotest.check_raises "decrease blames caller"
     (Contract.Blame { party = "client"; contract = "inputs" })
-    (fun () -> ignore (Contract.with_state ~initial:0 (fun () ->
-      ignore (f 3); f 2)))
+    (fun () -> ignore ([%contract_main_state 0]
+      (ignore (f 3); f 2)))
 
 let budget_calls () =
   let f = [%mon (budget @-> budget)] Fun.id in
@@ -67,8 +67,18 @@ let catch_blame () =
 
 let isolated_runs () =
   let thunk () = let s = Contract.get_state () in Contract.set_state (s + 1); s in
-  Alcotest.(check int) "first" 0 (Contract.with_state ~initial:0 thunk);
-  Alcotest.(check int) "fresh invocation" 0 (Contract.with_state ~initial:0 thunk)
+  Alcotest.(check int) "first" 0 ([%contract_main_state 0] (thunk ()));
+  Alcotest.(check int) "fresh invocation" 0 ([%contract_main_state 0] (thunk ()))
+
+let main_state_initial () =
+  let evaluations = ref 0 in
+  let initial () = incr evaluations; 41 in
+  let result = [%contract_main_state (initial ())]
+    (let before = Contract.get_state () in
+     Contract.set_state (before + 1);
+     (before, Contract.get_state ())) in
+  Alcotest.(check (pair int int)) "initial state and update" (41, 42) result;
+  Alcotest.(check int) "initial expression evaluated once" 1 !evaluations
 
 let increment_calls () =
   let count_call _ =
@@ -92,5 +102,6 @@ let () = Alcotest.run "shallow state"
               case "nested predicate state" nested_predicate;
               case "catch blame with updated state" catch_blame;
               case "independent runs" isolated_runs;
+              case "main_state initial expression" main_state_initial;
               case "increment every function call" increment_calls;
               case "deep runtime preserved" deep_preserved] ]

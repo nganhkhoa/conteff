@@ -8,7 +8,8 @@ let port = ref 8080
 let malicious = ref false
 let curve_id = ref "secp256k1"
 
-let () =
+let%contract_main () =
+
   let specs = [
     ("--port", Arg.Set_int port, " Port to listen on");
     ("--malicious", Arg.Set malicious, " Send malicious off-curve point");

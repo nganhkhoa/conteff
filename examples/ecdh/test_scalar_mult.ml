@@ -1,6 +1,7 @@
 open Curves
 
-let () =
+let%contract_main () =
+
   let k = Z.of_int 42 in
   let p1 = Secp256k1Curve.generator in
   let p2 = EllipticCurve.Affine (Z.one, Z.one) in
@@ -12,4 +13,3 @@ let () =
   | Affine (x, y) ->
       Printf.printf "Result X: %s\n" (Z.to_string x);
       Printf.printf "Result Y: %s\n%!" (Z.to_string y)
-

@@ -1,7 +1,7 @@
 (tests
  (names test_runtime test_flat test_function test_dependent test_tuple test_let
-  test_hijack test_box test_state)
+  test_hijack test_box test_state test_multi_state)
  (modules helpers test_runtime test_flat test_function test_dependent test_tuple
-  test_let test_hijack test_box test_state)
+  test_let test_hijack test_box test_state test_multi_state)
  (preprocess (pps conteff))
  (libraries alcotest conteff.lib))

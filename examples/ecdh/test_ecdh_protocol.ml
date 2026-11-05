@@ -6,14 +6,14 @@ module Protocol = MakeECDHProtocol(Secp256k1_Params)
 let priv_a = Z.of_int 11111
 let priv_b = Z.of_int 22222
 
-let pub_a_point = Protocol.EC.scalar_mult priv_a Protocol.EC.generator
-let pub_b_point = Protocol.EC.scalar_mult priv_b Protocol.EC.generator
+let pub_a_point () = Protocol.EC.scalar_mult priv_a Protocol.EC.generator
+let pub_b_point () = Protocol.EC.scalar_mult priv_b Protocol.EC.generator
 
 let test_encode () =
   Printf.printf "--- Testing encode_public_key ---\n";
 
   Printf.printf "  [+] Encoding valid Affine point...\n";
-  let payload = Protocol.encode_public_key pub_a_point in
+  let payload = Protocol.encode_public_key (pub_a_point ()) in
 
   try
     let _ = Protocol.encode_public_key Infinity in
@@ -25,7 +25,7 @@ let test_encode () =
 
 let test_decode () =
   Printf.printf "--- Testing decode_public_key ---\n";
-  let valid_payload = Protocol.encode_public_key pub_a_point in
+  let valid_payload = Protocol.encode_public_key (pub_a_point ()) in
 
   Printf.printf "  [+] Decoding perfectly formatted, valid curve point...\n";
   let decoded_point = Protocol.decode_public_key valid_payload in
@@ -54,8 +54,8 @@ let test_decode () =
 let test_compute () =
   Printf.printf "--- Testing compute_shared_secret ---\n";
 
-  let alice_payload = Protocol.encode_public_key pub_a_point in
-  let bob_payload   = Protocol.encode_public_key pub_b_point in
+  let alice_payload = Protocol.encode_public_key (pub_a_point ()) in
+  let bob_payload   = Protocol.encode_public_key (pub_b_point ()) in
 
   Printf.printf "  [+] Alice computing secret with Bob's payload...\n";
   let point_from_alice = Protocol.compute_shared_point priv_a bob_payload in
@@ -75,7 +75,8 @@ let test_compute () =
   | _ ->
       Printf.printf "      -> FATAL: Unexpected Infinity result.\n"
 
-let () =
+let%contract_main () =
+
   test_encode ();
   test_decode ();
   test_compute ();

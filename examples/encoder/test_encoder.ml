@@ -46,7 +46,8 @@ module TestFail = struct
       let _ = Wrong.encode binary_input in ())
 end
 
-let () =
+let%contract_main () =
+
   Printf.printf "=== STARTING CODEC CONTRACT VERIFICATION ===\n\n";
   TestHonest.run ();
   TestFail.run ();

@@ -11,7 +11,14 @@
 
    [%hijack] e  /  [%hijack policy] e
        Run e under a custom handler for contract checks (C-Hijack of
-       redex/compiler3.rkt). Without a policy, checks are skipped. *)
+       redex/compiler3.rkt). Without a policy, checks are skipped.
+
+   [%contract_main] e
+       Mark the program entry point. The whole expression is run under the
+       default contract handler.
+
+   [%contract_main_state initial] e 
+       Run e under the state-aware contract handler, discarding final state. *)
 
 open Ppxlib
 open Ast_builder.Default
@@ -189,6 +196,25 @@ let rewriter =
         List.fold_left
           (fun (env, acc) item ->
             match item.pstr_desc with
+            | Pstr_extension (({ txt = "contract_main"; _ }, payload), _) ->
+                (match payload with
+                 | PStr [ { pstr_desc = Pstr_value (Nonrecursive, [ vb ]); _ } ] ->
+                     (match vb.pvb_pat.ppat_desc with
+                      | Ppat_construct ({ txt = Lident "()"; _ }, None) ->
+                          let loc = item.pstr_loc in
+                          let body = self#expression env vb.pvb_expr in
+                          let wrapped =
+                            Codegen.app ~loc (Codegen.runtime ~loc "Contract" "run")
+                              [ pexp_fun ~loc Nolabel None (punit ~loc) body ]
+                          in
+                          let vb = { vb with pvb_expr = wrapped } in
+                          (env, pstr_value ~loc Nonrecursive [ vb ] :: acc)
+                      | _ ->
+                          Location.raise_errorf ~loc:item.pstr_loc
+                            "[%%contract_main] must annotate a unit binding: let[%%contract_main] () = ...")
+                 | _ ->
+                     Location.raise_errorf ~loc:item.pstr_loc
+                       "[%%contract_main] must annotate a single binding: let[%%contract_main] () = ...")
             | Pstr_value (rec_flag, vbs) when List.exists (fun vb -> contract_of_vb vb <> None) vbs ->
                 let loc = item.pstr_loc in
                 let items, values, monitors, contracted = self#expand env rec_flag vbs in
@@ -301,5 +327,27 @@ let rewriter =
             [ policy; pexp_fun ~loc Nolabel None (punit ~loc) (self#expression env arg) ]
       | Pexp_extension ({ txt = "hijack"; _ }, _) ->
           Location.raise_errorf ~loc "[%%hijack] must be applied to an expression: [%%hijack] e"
+      | Pexp_apply ({ pexp_desc = Pexp_extension ({ txt = "contract_main_state"; _ }, payload); _ },
+                    [ (Nolabel, arg) ]) ->
+          let initial =
+            match payload with
+            | PStr [ { pstr_desc = Pstr_eval (initial, _); _ } ] -> self#expression env initial
+            | _ -> Location.raise_errorf ~loc
+                     "[%%contract_main_state initial] expects one initial state expression"
+          in
+          pexp_apply ~loc (Codegen.runtime ~loc "Contract" "with_state")
+            [ (Labelled "initial", initial);
+              (Nolabel, pexp_fun ~loc Nolabel None (punit ~loc) (self#expression env arg)) ]
+      | Pexp_extension ({ txt = "contract_main_state"; _ }, _) ->
+          Location.raise_errorf ~loc "[%%contract_main_state initial] must be applied to an expression: [%%contract_main_state initial] e"
+      (* [%contract_main] e: install the default contract handler around the program. *)
+      | Pexp_apply ({ pexp_desc = Pexp_extension ({ txt = "contract_main"; _ }, payload); _ }, [ (Nolabel, arg) ]) ->
+          (match payload with
+           | PStr [] -> ()
+           | _ -> Location.raise_errorf ~loc "[%%contract_main] does not take a payload; use [%%contract_main_state initial] for state");
+          Codegen.app ~loc (Codegen.runtime ~loc "Contract" "run")
+            [ pexp_fun ~loc Nolabel None (punit ~loc) (self#expression env arg) ]
+      | Pexp_extension ({ txt = "contract_main"; _ }, _) ->
+          Location.raise_errorf ~loc "[%%contract_main] must be applied to an expression: [%%contract_main] e"
       | _ -> super#expression env e
   end

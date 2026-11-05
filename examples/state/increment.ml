@@ -9,8 +9,8 @@ let count_call _ =
 let[@contract count_call @-> Contract.any] increment x = x + 1
 
 let () =
-  let (a, b), calls = Contract.with_state_result ~initial:0 (fun () ->
-    let a = increment 10 in
-    let b = increment 20 in
-    (a, b)) in
-  Printf.printf "Results: (%d, %d)\nCalls: %d\n" a b calls
+  [%contract_main_state 0]
+    (let a = increment 10 in
+     let b = increment 20 in
+     let calls = Contract.get_state () in
+     Printf.printf "Results: (%d, %d)\nCalls: %d\n" a b calls)

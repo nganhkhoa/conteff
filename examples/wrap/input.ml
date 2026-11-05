@@ -14,7 +14,8 @@ let show_blame thunk =
   | Conteff_lib.Contract.Blame { party; contract } ->
       Printf.printf "blame: party=%s, contract=%s\n" party contract
 
-let () =
+let%contract_main () =
+
   (* This handler only covers wrapper creation. No check occurs yet, so the
      returned function is not protected by this handler after it escapes. *)
   let escaped =

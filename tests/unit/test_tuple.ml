@@ -23,7 +23,8 @@ let triple () =
 let nested () = check_party "k" (fun () -> [%mon ((yes, no), yes) ~pos:"k"] ((1, 2), 3))
 
 let with_function () =
-  let f, n = [%mon (is_pos @-> yes, yes) ~pos:"k" ~neg:"l"] ((fun x -> x + 1), 3) in
+  let f, n = Contract.run (fun () ->
+    [%mon (is_pos @-> yes, yes) ~pos:"k" ~neg:"l"] ((fun x -> x + 1), 3)) in
   check_int 4 (fun () -> f n);
   check_party "l" (fun () -> f (-1))
 

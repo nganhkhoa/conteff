@@ -10,13 +10,12 @@ let chk ?(pos = "k") ?(loc = "j") p v = Contract.check ~pos ~loc p v
 let pass_under_run () = check_int 5 (fun () -> chk is_pos 5)
 let fail_under_run () = check_blame ~party:"k" ~contract:"j" (fun () -> chk is_pos 0)
 
-let fallback_pass () =
-  (* no handler installed at all: same behaviour as the default handler *)
-  Alcotest.(check int) "value" 5 (chk is_pos 5)
-
-let fallback_fail () =
-  Alcotest.check_raises "blame" (Contract.Blame { party = "k"; contract = "j" })
-    (fun () -> ignore (chk is_pos 0))
+let unhandled_without_handler () =
+  count := 0;
+  match chk (counted is_pos) 5 with
+  | _ -> Alcotest.fail "expected unhandled Check"
+  | exception Effect.Unhandled (Contract.Check _) ->
+      Alcotest.(check int) "predicate not evaluated" 0 !count
 
 let predicate_runs_once () =
   count := 0;
@@ -89,8 +88,7 @@ let () =
     [ ( "default handler",
         [ case "pass under run" pass_under_run;
           case "fail under run" fail_under_run;
-          case "fallback pass" fallback_pass;
-          case "fallback fail" fallback_fail;
+          case "unhandled without handler" unhandled_without_handler;
           case "predicate runs once" predicate_runs_once;
           case "blame catchable at monitor" blame_is_catchable_at_monitor;
           case "contracts inside predicates" predicate_contracts_enforced;
