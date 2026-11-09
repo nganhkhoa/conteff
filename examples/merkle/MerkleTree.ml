@@ -28,7 +28,13 @@ let hash_node h left_tree right_tree =
   h (Bytes.to_string combined)
 
 let
-  [@contract : (any -> good_length) -> (any -> equal_count dep)]
+  [@contract (any @-> good_length) @->
+    dep_args
+      [
+        (items, any)
+      ]
+      (fun items -> equal_count items)
+  ]
   build (h : string -> bytes) (items : string list) : tree =
     let rec build_rec = function
       | [] -> Empty

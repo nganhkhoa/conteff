@@ -9,7 +9,12 @@ module MakeEncoder (C : CODEC) = struct
     String.equal input (C.decode encoded)
 
   let
-    [@contract : any -> decode_able dep]
+    [@contract dep_args
+      [
+        (input, any)
+      ]
+      (fun input -> decode_able input)
+    ]
     encode (s : string) : bytes =
       C.encode s
 

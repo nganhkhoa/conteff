@@ -191,3 +191,7 @@ single integer state.
 
 For a full reference to the macro syntax, expansions, state handlers, and blame
 labels, see [docs/macros.md](docs/macros.md).
+
+## CESK machines
+
+See [the proxy-aware CESK README](examples/cesk-proxy/README.md) for usage and tests.

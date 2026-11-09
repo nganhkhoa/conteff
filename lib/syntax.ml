@@ -7,6 +7,15 @@
      pred                      flat contract, any expression of type 'a -> bool
      c1 @-> c2                 function contract (right associative)
      dep c1 (fun x -> c2)      dependent function contract, x is in scope in c2
+     dep_args [(x, c1); (y, c2)] (fun x y -> c3)
+                                curried dependent contract, equivalent to
+                                dep c1 (fun x -> dep c2 (fun y -> c3))
+                                Each list binder is a distinct identifier;
+                                earlier binders scope over later contracts,
+                                and the result function must name all binders
+                                in the same order. The list must be nonempty.
+                                For example:
+     dep_args [(x, is_pos); (y, gt x)] (fun x y -> gt (x + y))
      (c1, c2, ...)             tuple contract
      box c                     contract on a Conteff_lib.Box.t
      vector c                  contract on a Conteff_lib.Vector.t
@@ -30,6 +39,53 @@ let rec of_expression (e : expression) : t =
   | Pexp_apply ({ pexp_desc = Pexp_ident { txt = Lident "@->"; _ }; _ },
                 [ (Nolabel, dom); (Nolabel, rng) ]) ->
       Fun (of_expression dom, of_expression rng)
+  | Pexp_apply ({ pexp_desc = Pexp_ident { txt = Lident "dep_args"; _ }; _ },
+                [ (Nolabel, args); (Nolabel, result) ]) ->
+      let rec entries e =
+        match e.pexp_desc with
+        | Pexp_construct ({ txt = Lident "[]"; _ }, None) -> []
+        | Pexp_construct ({ txt = Lident "::"; _ },
+                          Some { pexp_desc = Pexp_tuple [entry; tail]; _ }) ->
+            let name, contract =
+              match entry.pexp_desc with
+              | Pexp_tuple
+                  [ { pexp_desc = Pexp_ident { txt = Lident name; loc }; _ }; contract ] ->
+                  ({ txt = name; loc }, contract)
+              | _ ->
+                  Location.raise_errorf ~loc:entry.pexp_loc
+                    "dep_args expects entries of the form (identifier, contract)"
+            in
+            (name, contract) :: entries tail
+        | _ ->
+            Location.raise_errorf ~loc:e.pexp_loc
+              "dep_args expects a literal list of (identifier, contract) entries"
+      in
+      let args = entries args in
+      if args = [] then
+        Location.raise_errorf ~loc:e.pexp_loc "dep_args requires at least one argument";
+      let names = List.map (fun (name, _) -> name.txt) args in
+      if List.length (List.sort_uniq String.compare names) <> List.length names then
+        Location.raise_errorf ~loc:e.pexp_loc "dep_args requires distinct argument names";
+      let body =
+        match result.pexp_desc with
+        | Pexp_function (params, None, Pfunction_body body)
+          when List.length params = List.length names &&
+               List.for_all2 (fun param name ->
+                 match param.pparam_desc with
+                 | Pparam_val (Nolabel, None, { ppat_desc = Ppat_var var; _ }) ->
+                     String.equal var.txt name
+                 | _ -> false) params names -> body
+        | _ ->
+            Location.raise_errorf ~loc:result.pexp_loc
+              "dep_args expects (fun x y ... -> contract) with the listed names in order"
+      in
+      List.fold_right
+        (fun (name, dom) rng ->
+          Dep (of_expression dom, Ast_builder.Default.ppat_var ~loc:name.loc name, rng))
+        args (of_expression body)
+  | Pexp_apply ({ pexp_desc = Pexp_ident { txt = Lident "dep_args"; _ }; _ }, _) ->
+      Location.raise_errorf ~loc:e.pexp_loc
+        "dep_args expects a list and a result function"
   | Pexp_apply ({ pexp_desc = Pexp_ident { txt = Lident "dep"; _ }; _ },
                 [ (Nolabel, dom); (Nolabel, rng) ]) -> (
       match rng.pexp_desc with

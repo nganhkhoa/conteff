@@ -33,18 +33,58 @@ dune exec tests/expand/pp.exe -- --impl path/to/file.ml
 * `c1 @-> c2` is a function contract; arrows associate to the right.
 * `dep c1 (fun x -> c2)` is a dependent function contract. Its range can
   refer to `x`; the range must be syntactically a single-parameter `fun`.
+* `dep_args [(x, c1); (y, c2)] (fun x y -> result_contract)` is
+  readable sugar for curried dependent contracts. Each later argument contract
+  may refer to earlier names; the result contract may refer to all of them.
+  The list must be a nonempty **literal** list of pairs, with distinct,
+  unqualified identifier names. The result must be a syntactic `fun` with
+  exactly those names, in that order, as unlabelled variable parameters (not
+  patterns, optional parameters, or labelled parameters). This is a contract
+  on curried arguments, not a single tuple argument.
 * `(c1, c2, ...)` monitors a tuple component by component, left to right.
 * `box c` and `vector c` monitor `Conteff_lib.Box.t` and
   `Conteff_lib.Vector.t`, respectively, not arbitrary OCaml refs or arrays.
+
+For example, the second argument must exceed the first and the result must
+be their sum:
+
+```ocaml
+let is_pos x = x > 0
+let gt x y = y > x
+
+let[@contract dep_args [(x, is_pos); (y, gt x)]
+  (fun x y -> fun result -> result = x + y)] add x y =
+  x + y
+
+let () = [%contract_main] (assert (add 1 2 = 3))
+```
+
+This expands to `dep is_pos (fun x -> dep (gt x) (fun y ->
+fun result -> result = x + y))`. It retains the same checking, blame,
+partial-application behavior, and staged evaluation as nested `dep` contracts.
+The older `dep` syntax remains available. The shorthand also works in `[%mon]`.
+A name is in scope only in later domains and the result, not its own domain:
+`[(x, gt x); (y, gt x)]` uses an outer `x` in the first domain and the
+argument `x` in the second. A `dep` binder can be a pattern such as
+`fun (x, y) -> ...`; `dep_args` binders cannot.
+
+At each curried stage, the current domain predicate is constructed before the
+monitored function or partial application at that stage; the next domain is
+constructed when the preceding argument is supplied. Each dependent domain
+is monitored twice per application, as described below. Thus stateful or
+otherwise effectful predicates must account for both checks.
 
 The older type-payload binding syntax remains supported, e.g.
 `let[@contract : is_pos -> is_pos] f x = x` and
 `let[@contract : is_pos -> above dep] f x = x`, where `above x result`
 produces the dependent range predicate. Expression payloads are more general.
 
-Predicate expressions are hoisted and evaluated once per monitor construction,
-left to right, before the monitored expression. Dependent range predicates are
-instead constructed under the dependent binder on each call. Function bodies,
+At each monitor construction, predicate expressions outside dependent ranges
+are hoisted and evaluated once, left to right, before the monitored expression.
+A dependent range is hoisted later, under its binder on each call; nested
+ranges are staged in the same way. For contracted bindings, a monitor may be
+constructed again at each rewritten use (and, for an exported function, on
+application), so this is not necessarily once per binding. Function calls,
 box operations, and vector operations are checked when used, not merely when
 the wrapper is constructed.
 
@@ -138,7 +178,9 @@ contract. Explicit monitor labels can themselves be expressions. In
 `[%mon c ~pos:k ~neg:l ~loc:j] e`, `k` is the provider, `l` the client, and
 `j` the contract. Defaults are `"server"`, `"client"`, and the source
 basename plus line (e.g. `"main_state.ml:1"`), respectively. Defaults do not
-infer an enclosing definition for an explicit `[%mon]`.
+infer an enclosing definition for an explicit `[%mon]`. Label expressions are
+inserted into generated checks rather than bound once; avoid side effects in
+them, especially for delayed or repeated checks.
 
 | Failure in a monitor with `(k, l, j)` | Default-handler blame |
 |---|---|
@@ -235,7 +277,10 @@ Built-in policies include `unchecked` (skip predicate and return the value),
 `observe callback next`, and `reassign party next`. A custom `Contract.policy`
 provides a polymorphic `on_check`; its returned value resumes the check and its
 exception is raised at the monitor. Nested handlers determine which policy sees
-each check.
+each check. `enforce` and `warn` run their predicates under a fresh default
+handler, so nested checks inside those predicates are enforced rather than passed
+back to the same custom policy. Other custom policies choose how to run their
+predicates.
 
 ## State-aware contracts
 
@@ -287,9 +332,12 @@ let result = [%contract_main_states]
 
 The declaration generates typed `Get`/`Set` effects and helper functions for
 each name plus one shared shallow handler. Each entry-point execution evaluates
-each initializer once, in declaration order, and starts a fresh state. The
-handler internally threads a heterogeneous nested tuple and discards final
-state on normal return. The `pp` output for the result is:
+each initializer once, in declaration order, and starts a fresh state. These
+expressions are evaluated **before** the generated handler is installed: they
+cannot use this fresh state or rely on it to handle checks. They have ordinary
+lexical scope at the declaration, not the entry point. The handler internally
+threads a heterogeneous nested tuple and discards final state on normal return;
+the macro does not expose a final-state pair. The `pp` output for the result is:
 
 ```ocaml
 let result =
@@ -353,10 +401,13 @@ handled by the state-aware handler: the nearest handler handles the check.
 ## Diagnostics and verification
 
 The ppx rejects an unapplied `[%mon]`, `[%hijack]`, or entry-point extension;
-`dep` without a syntactic `fun` range; and `[@contract]` on a non-variable
-pattern. State declarations require a nonempty nonrecursive group of typed,
-uniquely named bindings. Missing state names, unexpected get payloads, missing set
-expressions, and malformed entry-point payloads are errors. See
+`dep` without a syntactic single-parameter `fun` range; and `[@contract]` on a
+non-variable pattern. It also rejects malformed `dep_args` lists, duplicate
+names, mismatched result parameters, and incorrect arity. State declarations
+require a nonempty nonrecursive group of typed, uniquely named bindings. Missing
+state names, unexpected get payloads, missing set expressions, and malformed
+entry-point payloads are errors. A nonempty but undeclared state name instead
+rewrites to a helper name and normally produces an OCaml unbound-value error. See
 `tests/expand/errors.t/run.t` for exact diagnostics and
 `tests/expand/compile.t/run.t` for reproducible expansion snapshots. Runtime
 blame and higher-order cases are exercised in `tests/unit/test_flat.ml`,

@@ -129,6 +129,19 @@ let rewriter =
   object (self)
     inherit [env] Ast_traverse.map_with_context as super
 
+    (* Dependent binders scope over the range, not their own domain.  Parse
+       contract syntax before rewriting expressions so dep_args' binder names
+       are not mistaken for uses of outer contracted bindings. *)
+    method private contract env (c : Syntax.t) : Syntax.t =
+      match c with
+      | Flat e -> Flat (self#expression env e)
+      | Fun (dom, rng) -> Fun (self#contract env dom, self#contract env rng)
+      | Dep (dom, pat, rng) ->
+          Dep (self#contract env dom, pat, self#contract (unprotect_pat pat env) rng)
+      | Tuple cs -> Tuple (List.map (self#contract env) cs)
+      | Box c -> Box (self#contract env c)
+      | Vector c -> Vector (self#contract env c)
+
     (* names bound by a group of bindings, and the env their bodies see *)
     method private rhs_env env rec_flag (items : (contracted option * value_binding) list) =
       let plain = List.filter_map (fun (c, vb) -> if c = None then Some vb.pvb_pat else None) items in
@@ -309,7 +322,7 @@ let rewriter =
             | PStr [ { pstr_desc = Pstr_eval (c, _); _ } ] -> split_labels c
             | _ -> Location.raise_errorf ~loc "[%%mon c] expects a contract"
           in
-          let c = Syntax.of_expression (self#expression env c) in
+          let c = self#contract env (Syntax.of_expression c) in
           let lab d = function Some l -> self#expression env l | None -> estring ~loc d in
           Codegen.monitor ~loc ~pos:(lab "server" pos) ~neg:(lab "client" neg)
             ~cl:(lab (loc_label loc) cl) c (self#expression env arg)

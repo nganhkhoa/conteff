@@ -1,0 +1,19 @@
+(library
+ (name cesk_proxy_machine)
+ (wrapped false)
+ (modules (:standard \ main test_step))
+ (libraries sexplib str)
+ (preprocess (pps ppx_deriving.show ppx_deriving.eq conteff))
+ (flags (:standard -w -11-26-27-32-33-34-35-37-38-39)))
+
+(executable
+ (name main)
+ (modules main)
+ (public_name cesk-proxy)
+ (libraries cesk_proxy_machine sexplib)
+ (preprocess (pps conteff)))
+
+(test
+ (name test_step)
+ (modules test_step)
+ (libraries cesk_proxy_machine conteff.lib))

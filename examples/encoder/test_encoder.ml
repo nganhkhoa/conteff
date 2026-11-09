@@ -46,8 +46,19 @@ module TestFail = struct
       let _ = Wrong.encode binary_input in ())
 end
 
+let test_dependent_contract () =
+  let encoded = TestHonest.Xor.encode "round trip" in
+  assert (TestHonest.Xor.decode encoded = "round trip");
+  ignore (TestFail.Wrong.encode "abcd");
+  match TestFail.Wrong.encode "abc" with
+  | _ -> failwith "expected non-round-tripping codec to be rejected"
+  | exception Conteff_lib.Contract.Blame b ->
+      assert (b.party = "Encoder.MakeEncoder.encode");
+      assert (b.contract = "Encoder.MakeEncoder.encode")
+
 let%contract_main () =
 
+  test_dependent_contract ();
   Printf.printf "=== STARTING CODEC CONTRACT VERIFICATION ===\n\n";
   TestHonest.run ();
   TestFail.run ();

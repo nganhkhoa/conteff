@@ -80,3 +80,83 @@ and the entry point reject malformed payloads.
   > X
   $ ../pp.exe --impl states_main_unapplied.ml 2>&1 | grep -v '^\s*$' | tail -1
   Error: [%contract_main_states] must be applied to a body
+
+Malformed dep_args contracts must be rejected by the expander.
+
+  $ cat > dep_args_empty.ml <<'X'
+  > let f = [%mon dep_args [] (fun x -> yes)] g
+  > X
+  $ ../pp.exe --impl dep_args_empty.ml 2>&1 | grep -v '^\s*$' | tail -1
+  Error: dep_args requires at least one argument
+
+  $ cat > dep_args_duplicate.ml <<'X'
+  > let f = [%mon dep_args [(x, yes); (x, yes)] (fun x x -> yes)] g
+  > X
+  $ ../pp.exe --impl dep_args_duplicate.ml 2>&1 | grep -v '^\s*$' | tail -1
+  Error: dep_args requires distinct argument names
+
+  $ cat > dep_args_not_literal.ml <<'X'
+  > let f = [%mon dep_args args (fun x -> yes)] g
+  > X
+  $ ../pp.exe --impl dep_args_not_literal.ml 2>&1 | grep -v '^\s*$' | tail -1
+  Error: dep_args expects a literal list of (identifier, contract) entries
+
+  $ cat > dep_args_tail.ml <<'X'
+  > let f = [%mon dep_args ((x, yes) :: rest) (fun x -> yes)] g
+  > X
+  $ ../pp.exe --impl dep_args_tail.ml 2>&1 | grep -v '^\s*$' | tail -1
+  Error: dep_args expects a literal list of (identifier, contract) entries
+
+  $ cat > dep_args_entry.ml <<'X'
+  > let f = [%mon dep_args [yes] (fun x -> yes)] g
+  > X
+  $ ../pp.exe --impl dep_args_entry.ml 2>&1 | grep -v '^\s*$' | tail -1
+  Error: dep_args expects entries of the form (identifier, contract)
+
+  $ cat > dep_args_binder.ml <<'X'
+  > let f = [%mon dep_args [(1, yes)] (fun x -> yes)] g
+  > X
+  $ ../pp.exe --impl dep_args_binder.ml 2>&1 | grep -v '^\s*$' | tail -1
+  Error: dep_args expects entries of the form (identifier, contract)
+
+  $ cat > dep_args_result.ml <<'X'
+  > let f = [%mon dep_args [(x, yes); (y, yes)] result] g
+  > X
+  $ ../pp.exe --impl dep_args_result.ml 2>&1 | grep -v '^\s*$' | tail -1
+  Error: dep_args expects (fun x y ... -> contract) with the listed names in order
+
+  $ cat > dep_args_order.ml <<'X'
+  > let f = [%mon dep_args [(x, yes); (y, yes)] (fun y x -> yes)] g
+  > X
+  $ ../pp.exe --impl dep_args_order.ml 2>&1 | grep -v '^\s*$' | tail -1
+  Error: dep_args expects (fun x y ... -> contract) with the listed names in order
+
+  $ cat > dep_args_missing_param.ml <<'X'
+  > let f = [%mon dep_args [(x, yes); (y, yes)] (fun x -> yes)] g
+  > X
+  $ ../pp.exe --impl dep_args_missing_param.ml 2>&1 | grep -v '^\s*$' | tail -1
+  Error: dep_args expects (fun x y ... -> contract) with the listed names in order
+
+  $ cat > dep_args_extra_param.ml <<'X'
+  > let f = [%mon dep_args [(x, yes)] (fun x y -> yes)] g
+  > X
+  $ ../pp.exe --impl dep_args_extra_param.ml 2>&1 | grep -v '^\s*$' | tail -1
+  Error: dep_args expects (fun x y ... -> contract) with the listed names in order
+
+  $ cat > dep_args_pattern.ml <<'X'
+  > let f = [%mon dep_args [(x, yes)] (fun (x, y) -> yes)] g
+  > X
+  $ ../pp.exe --impl dep_args_pattern.ml 2>&1 | grep -v '^\s*$' | tail -1
+  Error: dep_args expects (fun x y ... -> contract) with the listed names in order
+
+  $ cat > dep_args_label.ml <<'X'
+  > let f = [%mon dep_args [(x, yes)] (fun ~x -> yes)] g
+  > X
+  $ ../pp.exe --impl dep_args_label.ml 2>&1 | grep -v '^\s*$' | tail -1
+  Error: dep_args expects (fun x y ... -> contract) with the listed names in order
+
+  $ cat > dep_args_arity.ml <<'X'
+  > let f = [%mon dep_args [(x, pos)]] succ
+  > X
+  $ ../pp.exe --impl dep_args_arity.ml 2>&1 | grep -v '^\s*$' | tail -1
+  Error: dep_args expects a list and a result function
