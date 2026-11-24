@@ -63,8 +63,18 @@ let contract_of_vb vb =
       else None)
     vb.pvb_attributes
 
+let effect_contracts_of_vb vb =
+  List.filter_map
+    (fun a -> if a.attr_name.txt = "effect_contract" then
+       Some (Syntax.effect_of_payload ~loc:a.attr_loc a.attr_payload) else None)
+    vb.pvb_attributes
+
+let has_contract vb =
+  List.exists (fun a -> a.attr_name.txt = "contract" || a.attr_name.txt = "effect_contract") vb.pvb_attributes
+
 let without_contract_attr vb =
-  { vb with pvb_attributes = List.filter (fun a -> a.attr_name.txt <> "contract") vb.pvb_attributes }
+  { vb with pvb_attributes = List.filter (fun a ->
+      a.attr_name.txt <> "contract" && a.attr_name.txt <> "effect_contract") vb.pvb_attributes }
 
 let rec var_of_pat p =
   match p.ppat_desc with
@@ -87,25 +97,33 @@ type contracted = {
   name : string;
   raw : string;
   monf : string;
-  contract : Syntax.t;
+  contract : Syntax.t option;
+  effects : Syntax.effect_contract list;
   vb : value_binding;
 }
 
 let analyse vb =
-  match contract_of_vb vb with
-  | None -> None
-  | Some contract -> (
-      match var_of_pat vb.pvb_pat with
-      | None ->
-          Location.raise_errorf ~loc:vb.pvb_loc
-            "[@contract] can only annotate a binding of a single variable"
-      | Some name ->
-          Some
-            { name;
-              raw = Codegen.gensym ("raw_" ^ name ^ "_");
-              monf = Codegen.gensym ("mon_" ^ name ^ "_");
-              contract;
-              vb = without_contract_attr vb })
+  let contract = contract_of_vb vb in
+  let effects = effect_contracts_of_vb vb in
+  if contract = None && effects = [] then None else
+  match var_of_pat vb.pvb_pat with
+  | None ->
+      if effects = [] then
+        Location.raise_errorf ~loc:vb.pvb_loc
+          "[@contract] can only annotate a binding of a single variable"
+      else
+        Location.raise_errorf ~loc:vb.pvb_loc
+          "[@effect_contract] can only annotate a binding of a single variable"
+  | Some name ->
+      (match vb.pvb_expr.pexp_desc with
+       | Pexp_function (params, _, _) when effects <> [] && List.length params > 1 ->
+           Location.raise_errorf ~loc:vb.pvb_loc
+             "[@effect_contract] currently supports one function parameter; use a tuple for multiple arguments"
+       | _ -> ());
+      Some { name;
+        raw = Codegen.gensym ("raw_" ^ name ^ "_");
+        monf = Codegen.gensym ("mon_" ^ name ^ "_");
+        contract; effects; vb = without_contract_attr vb }
 
 let use_site ~loc env monf = Codegen.app ~loc (Codegen.evar ~loc monf) [ estring ~loc (label env) ]
 
@@ -187,8 +205,15 @@ let rewriter =
                 let me = label (enter c.name env) in
                 let neg = Codegen.gensym "neg" in
                 let body =
-                  Codegen.monitor ~loc ~pos:(estring ~loc me) ~neg:(Codegen.evar ~loc neg)
-                    ~cl:(estring ~loc me) c.contract (Codegen.evar ~loc c.raw)
+                  let pos = estring ~loc me and neg = Codegen.evar ~loc neg and cl = estring ~loc me in
+                  let raw = Codegen.evar ~loc c.raw in
+                  let raw = List.fold_right (fun (ec : Syntax.effect_contract) raw ->
+                    let ec = { ec with request = self#expression env ec.request;
+                                                response = self#expression env ec.response } in
+                    Codegen.effect_monitor ~loc ~pos ~neg ~cl ec raw) c.effects raw in
+                  match c.contract with
+                  | None -> raw
+                  | Some contract -> Codegen.monitor ~loc ~pos ~neg ~cl contract raw
                 in
                 value_binding ~loc ~pat:(Codegen.pvar ~loc c.monf) ~expr:(Codegen.fun_ ~loc neg body))
               c)
@@ -228,7 +253,7 @@ let rewriter =
                  | _ ->
                      Location.raise_errorf ~loc:item.pstr_loc
                        "[%%contract_main] must annotate a single binding: let[%%contract_main] () = ...")
-            | Pstr_value (rec_flag, vbs) when List.exists (fun vb -> contract_of_vb vb <> None) vbs ->
+            | Pstr_value (rec_flag, vbs) when List.exists has_contract vbs ->
                 let loc = item.pstr_loc in
                 let items, values, monitors, contracted = self#expand env rec_flag vbs in
                 let defs =
@@ -243,7 +268,7 @@ let rewriter =
                     (fun c ->
                       let use = Codegen.app ~loc (Codegen.evar ~loc c.monf) [ estring ~loc "external" ] in
                       let expr =
-                        if Codegen.is_function_contract c.contract then
+                        if c.effects <> [] || Option.fold ~none:false ~some:Codegen.is_function_contract c.contract then
                           let a = Codegen.gensym "a" in
                           Codegen.fun_ ~loc a (Codegen.app ~loc use [ Codegen.evar ~loc a ])
                         else use
@@ -282,7 +307,7 @@ let rewriter =
       match e.pexp_desc with
       | Pexp_ident { txt = Lident x; _ } when List.mem_assoc x env.protected ->
           use_site ~loc env (List.assoc x env.protected)
-      | Pexp_let (rec_flag, vbs, body) when List.exists (fun vb -> contract_of_vb vb <> None) vbs ->
+      | Pexp_let (rec_flag, vbs, body) when List.exists has_contract vbs ->
           let items, values, monitors, _ = self#expand env rec_flag vbs in
           let body = self#expression (self#after_env env items) body in
           (match rec_flag with

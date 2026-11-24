@@ -1,0 +1,10 @@
+(tests
+ (names allow_call ghost_state must_call non_reentrant termination
+        exceptions framing purity restricted_effect union_contracts)
+ (preprocess (pps conteff))
+ (libraries conteff.lib))
+
+(test
+ (name union_contracts_v2)
+ (modules union_contracts_v2)
+ (libraries conteff.lib))

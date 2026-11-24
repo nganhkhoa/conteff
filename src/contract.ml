@@ -70,6 +70,42 @@ and run : 'a. (unit -> 'a) -> 'a =
 let check ~pos ~loc pred value =
   Effect.perform (Check { pos; loc; pred; value })
 
+(* An effect boundary for a function invocation. [intercept] selects operations
+   using their typed constructors; its thunk runs outside this handler, so it
+   can perform the operation again for the next handler. Unselected effects
+   pass through unchanged. *)
+type effect_contract = {
+  intercept : 'a. 'a Effect.t -> (unit -> 'a) option;
+}
+
+let with_effect_contract (contract : effect_contract) thunk =
+  let open Effect.Shallow in
+  let rec handler : type a. unit -> (a, a) handler = fun () ->
+    { retc = Fun.id;
+      exnc = raise;
+      effc = (fun (type b) (eff : b Effect.t) ->
+        match contract.intercept eff with
+        | None -> None
+        | Some forward ->
+            Some (fun (k : (b, a) continuation) ->
+              match forward () with
+              | value -> continue_with k value (handler ())
+              | exception e -> discontinue_with k e (handler ()))) }
+  in
+  continue_with (fiber thunk) () (handler ())
+
+(* Install a fresh boundary on every application, not when wrapping [f]. *)
+let effectful_function contract f x =
+  with_effect_contract contract (fun () -> f x)
+
+(* For a single operation: the provider is responsible for its request and
+   the surrounding handler for its response. [perform] reconstructs the typed
+   effect from the checked request. Checks use the ordinary Check policy. *)
+let forward_effect ~pos ~neg ~loc ~request ~response perform payload =
+  let payload = check ~pos ~loc request payload in
+  let result = perform payload in
+  check ~pos:neg ~loc response result
+
 (* ---------- custom handlers ---------- *)
 
 (* A policy decides the outcome of one check. Returning a value resumes the

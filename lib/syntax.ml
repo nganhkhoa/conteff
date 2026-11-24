@@ -5,6 +5,8 @@
    plus box/vector contracts. Contracts are written as OCaml expressions:
 
      pred                      flat contract, any expression of type 'a -> bool
+     custom projection         custom projection, of type
+                                pos:_ -> neg:_ -> loc:_ -> 'a -> 'a
      c1 @-> c2                 function contract (right associative)
      dep c1 (fun x -> c2)      dependent function contract, x is in scope in c2
      dep_args [(x, c1); (y, c2)] (fun x y -> c3)
@@ -34,8 +36,23 @@ type t =
   | Box of t
   | Vector of t
 
+(* Keep projections inside a recognizable expression marker so existing
+   syntax traversals visit their contents just like flat predicates.  The
+   marker is consumed by code generation and never reaches emitted OCaml. *)
+let custom_marker = "__conteff_custom_projection"
+
+let custom ~loc projection =
+  Flat (Ast_builder.Default.pexp_extension ~loc
+    ({ txt = custom_marker; loc }, PStr [ Ast_builder.Default.pstr_eval ~loc projection [] ]))
+
 let rec of_expression (e : expression) : t =
   match e.pexp_desc with
+  | Pexp_apply ({ pexp_desc = Pexp_ident { txt = Lident "custom"; _ }; _ },
+                [ (Nolabel, projection) ]) ->
+      custom ~loc:e.pexp_loc projection
+  | Pexp_apply ({ pexp_desc = Pexp_ident { txt = Lident "custom"; _ }; _ }, _) ->
+      Location.raise_errorf ~loc:e.pexp_loc
+        "custom expects a single projection expression"
   | Pexp_apply ({ pexp_desc = Pexp_ident { txt = Lident "@->"; _ }; _ },
                 [ (Nolabel, dom); (Nolabel, rng) ]) ->
       Fun (of_expression dom, of_expression rng)
@@ -135,3 +152,22 @@ let of_payload ~loc (p : payload) : t =
   | PStr [ { pstr_desc = Pstr_eval (e, _); _ } ] -> of_expression e
   | PTyp ct -> of_core_type ct
   | _ -> Location.raise_errorf ~loc "expected a contract, e.g. [@contract pred @-> pred]"
+
+(* [@effect_contract Op (request |> response)] selects one unary operation.
+   The pipe is syntax only; neither predicate is applied to the other. *)
+type effect_contract = {
+  operation : Longident.t loc;
+  request : expression;
+  response : expression;
+}
+
+let effect_of_payload ~loc = function
+  | PStr [{ pstr_desc = Pstr_eval
+      ({ pexp_desc = Pexp_construct (operation,
+          Some { pexp_desc = Pexp_apply
+            ({ pexp_desc = Pexp_ident { txt = Lident "|>"; _ }; _ },
+             [Nolabel, request; Nolabel, response]); _ }); _ }, _); _ }] ->
+      { operation; request; response }
+  | _ ->
+      Location.raise_errorf ~loc
+        "expected [@effect_contract Operation (request_predicate |> response_predicate)]"
